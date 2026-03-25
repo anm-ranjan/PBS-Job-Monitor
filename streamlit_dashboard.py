@@ -21,7 +21,7 @@ from convergence_plotter import ConvergenceParser, ConvergencePlotter, parse_and
 
 st.set_page_config(
     page_title="ISHM-SUITE | PBS Job Monitor",
-    page_icon="IPA_Logo.PNG",
+    page_icon="Logo.png",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -285,7 +285,7 @@ def main():
     sidebar = st.sidebar
 
     # Display logo and ISHM-SUITE branding
-    logo_path = os.path.join(os.path.dirname(__file__), "IPA_Logo.PNG")
+    logo_path = os.path.join(os.path.dirname(__file__), "Logo.png")
     if os.path.exists(logo_path):
         sidebar.image(logo_path, use_container_width=True)
     sidebar.markdown(
