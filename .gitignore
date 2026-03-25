@@ -1,0 +1,34 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# ── Node / Frontend build ────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+
+# ── Runtime / generated files ────────────────────────────
+backend/job_database.json
+backend/messag_react
+backend/runtimePBSProDB.ses
+backend/temp.ses
+
+# ── Site config (sensitive — use config.yaml.example) ───
+backend/config.yaml
+
+# ── Release archives ─────────────────────────────────────
+*.tar.gz
+*.zip
+
+# ── Claude Code local settings ───────────────────────────
+.claude/settings.local.json
+
+# ── OS / editor noise ───────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

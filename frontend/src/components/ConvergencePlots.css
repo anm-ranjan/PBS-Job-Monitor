@@ -1,0 +1,71 @@
+.plots-msg {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.plots-msg.error { color: var(--error); }
+
+.plots-updated {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+  margin-bottom: 8px;
+}
+
+.summary-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 12px;
+  background: rgba(0,0,0,0.2);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.s-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.s-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.s-value.success { color: var(--success); }
+.s-value.danger { color: var(--error); }
+.s-value.status-normal { color: var(--success); }
+.s-value.status-error { color: var(--error); }
+.s-value.status-in-progress { color: var(--warning); }
+
+.plot-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.plot-wrap {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.plot-label {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}

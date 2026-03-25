@@ -1,0 +1,72 @@
+.job-table-card { flex-shrink: 0; }
+
+.job-table-empty .empty-msg {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.job-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.job-table th {
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.job-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.job-table th.sortable:hover { color: var(--primary-light); }
+
+.sort-arrow { font-size: 10px; }
+
+.job-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(30, 58, 82, 0.5);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.job-table tr { cursor: pointer; transition: background 0.1s; }
+.job-table tr:hover td { background: var(--bg-card-hover); }
+.job-table tr.selected td { background: rgba(45, 158, 168, 0.12); }
+.job-table tr.selected:hover td { background: rgba(45, 158, 168, 0.18); }
+
+.mono { font-family: 'Consolas', 'Courier New', monospace; }
+
+/* Actions column — narrow, no sort indicator */
+.col-actions { width: 56px; text-align: center; }
+
+/* Hidden job shown when "Show Hidden" is active — dimmed */
+.job-table tr.job-hidden-visible td { opacity: 0.45; }
+.job-table tr.job-hidden-visible:hover td { opacity: 0.7; }
+
+/* Extra-small button for inline row actions */
+.btn-xs {
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.selected-hint {
+  font-size: 11px;
+  color: var(--primary-light);
+  font-weight: normal;
+}

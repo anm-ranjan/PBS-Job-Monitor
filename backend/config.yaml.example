@@ -1,0 +1,63 @@
+# PBS PRO Job Monitor Configuration
+# Copy this file to config.yaml and fill in your site-specific values.
+
+# ================================
+
+# PBS Pro command paths on Linux servers
+
+pbs:
+  qdel_path: "/opt/pbs/bin/qdel"
+  qsub_path: "/opt/pbs/bin/qsub"
+
+# Linux filesystem configuration
+
+paths:
+  # Base path for user directories (username will be appended)
+  # Final path: {linux_base_path}/{username}
+  linux_base_path: "/mnt/fhgfs"
+
+  # Name of the job monitoring script on remote servers
+  remote_script_name: "que.py"
+
+# Drive letter to server IP/hostname mapping
+# Used to determine which server handles which Windows drive
+
+drive_mapping:
+  X: "192.168.1.10"   # Replace with your server IPs
+  Y: "192.168.1.11"
+  Z: "192.168.1.12"
+
+# Server configurations
+# Note: 'username' and 'key_file' will be auto-populated at runtime
+# based on the current Windows user
+
+servers:
+  - hostname: "192.168.1.10"   # Replace with actual hostname/IP
+    name: "Server1"
+
+  - hostname: "192.168.1.11"
+    name: "Server2"
+
+  - hostname: "192.168.1.12"
+    name: "Server3"
+
+# SSH Configuration (optional overrides)
+ssh:
+  # key_file: "~/.ssh/id_rsa"
+  connection_timeout: 10
+
+# Dashboard refresh interval (seconds)
+dashboard:
+  refresh_interval: 20
+  cache_timeout: 20
+  # How often (seconds) the background thread copies messag → messag_react.
+  # Lower = fresher data but more frequent file-system activity.
+  messag_copy_interval: 30
+
+# META CAE Systems viewer integration.
+# Remove this section entirely (or omit 'executable') to disable the feature.
+# meta:
+#   executable: 'C:\Path\To\meta_post64.bat'
+#   d3plot_poll_interval_minutes: 10      # How often to check for new d3plot files
+#   metadb_poll_interval_seconds: 30      # How often to check if metadb is ready
+#   metadb_poll_timeout_minutes: 60       # Give up after this long

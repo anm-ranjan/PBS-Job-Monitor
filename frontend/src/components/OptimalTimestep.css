@@ -1,0 +1,51 @@
+.ots-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ots-status {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.ots-error { color: var(--error); }
+
+.ots-info-bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.ots-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.ots-stat label {
+  display: inline;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0;
+}
+
+.ots-export-btn {
+  margin-left: auto;
+  padding: 5px 16px;
+}
+
+.ots-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 0 8px 4px;
+}
