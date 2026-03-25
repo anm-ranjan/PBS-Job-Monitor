@@ -227,6 +227,8 @@ class ConvergenceParser:
 
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics"""
+        last_step = self.data["timeSteps"][-1] if self.data["timeSteps"] else None
+        current_sim_time = self._safe_float(last_step.get("targetTime")) if last_step else None
         return {
             "hostname": self.data["hostname"],
             "start_date": self.data["simulationStart"]["date"],
@@ -236,6 +238,7 @@ class ConvergenceParser:
             "converged_steps": self.data["convergedSteps"],
             "failed_steps": self.data["failedSteps"],
             "termination_status": self.data["terminationStatus"],
+            "current_sim_time": current_sim_time,
         }
 
 
@@ -287,10 +290,12 @@ class ConvergencePlotter:
         steps = []
         iterations = []
         colors = []
+        sim_times = []
 
         for step in self.data["timeSteps"]:
             steps.append(step["stepNumber"])
             iterations.append(len(step["iterations"]))
+            sim_times.append(self._safe_float(step.get("targetTime")) or 0.0)
 
             status = step["convergenceStatus"]
             if status == "converged":
@@ -309,6 +314,13 @@ class ConvergencePlotter:
                 marker_line_width=0.5,
                 text=iterations,
                 textposition="outside",
+                customdata=sim_times,
+                hovertemplate=(
+                    "Step: %{x}<br>"
+                    "Iterations: %{y}<br>"
+                    "Sim Time: %{customdata:.4g}"
+                    "<extra></extra>"
+                ),
             )
         )
 
@@ -345,6 +357,7 @@ class ConvergencePlotter:
         steps = []
         durations = []
         colors = []
+        sim_times_dur = []
 
         for i, step in enumerate(self.data["timeSteps"]):
             if i == 0:
@@ -371,6 +384,7 @@ class ConvergencePlotter:
 
                     steps.append(step["stepNumber"])
                     durations.append(duration_sec)
+                    sim_times_dur.append(self._safe_float(step.get("targetTime")) or 0.0)
 
                     status = step["convergenceStatus"]
                     if status == "converged":
@@ -390,6 +404,13 @@ class ConvergencePlotter:
                     marker_color=colors,
                     marker_line_color="black",
                     marker_line_width=0.5,
+                    customdata=sim_times_dur,
+                    hovertemplate=(
+                        "Step: %{x}<br>"
+                        "Duration: %{y:.1f}s<br>"
+                        "Sim Time: %{customdata:.4g}"
+                        "<extra></extra>"
+                    ),
                 )
             )
 

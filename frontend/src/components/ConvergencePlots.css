@@ -47,6 +47,28 @@
 .s-value.status-error { color: var(--error); }
 .s-value.status-in-progress { color: var(--warning); }
 
+.plots-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.fade-toggle {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  border-color: var(--border);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.fade-toggle--on {
+  color: var(--primary-light);
+  border-color: var(--primary-teal);
+  background: rgba(45, 158, 168, 0.08);
+}
+.fade-toggle:hover { color: var(--text-primary); }
+
 .plot-grid {
   display: flex;
   flex-direction: column;

@@ -79,6 +79,10 @@ function applyNormStepOpacity(traces) {
   })
 }
 
+function clearNormStepOpacity(traces) {
+  return traces.map(trace => ({ ...trace, opacity: 1.0 }))
+}
+
 /**
  * Return the last data point from the last trace (= current step, last iteration).
  * Returns null if the figure has no usable traces.
@@ -102,7 +106,7 @@ function getLastPoint(fig) {
  * Isolated in its own component so only these two charts re-render on each
  * blink tick — the other four plots are completely unaffected.
  */
-function NormPlot({ fig, theme }) {
+function NormPlot({ fig, theme, fadingEnabled }) {
   const [blinkVisible, setBlinkVisible] = useState(true)
   useEffect(() => {
     const id = setInterval(() => setBlinkVisible(v => !v), 1400)
@@ -110,7 +114,7 @@ function NormPlot({ fig, theme }) {
   }, [])
 
   const processedFig = useMemo(() => {
-    const data = applyNormStepOpacity(fig.data)
+    const data = fadingEnabled ? applyNormStepOpacity(fig.data) : clearNormStepOpacity(fig.data)
     const pt = getLastPoint(fig)
     if (pt) {
       const blinkTrace = {
@@ -132,7 +136,7 @@ function NormPlot({ fig, theme }) {
       return { ...fig, data: [...data, blinkTrace] }
     }
     return { ...fig, data }
-  }, [fig, blinkVisible])
+  }, [fig, blinkVisible, fadingEnabled])
 
   const merged = mergeLayout(processedFig, theme)
   return (
@@ -149,6 +153,7 @@ function NormPlot({ fig, theme }) {
 /** Shared rendering — accepts already-fetched {summary, plots} */
 export function PlotPanel({ summary, plots }) {
   const theme = useTheme()
+  const [fadingEnabled, setFadingEnabled] = useState(true)
 
   return (
     <div className="convergence-plots">
@@ -177,6 +182,12 @@ export function PlotPanel({ summary, plots }) {
           <span className="s-label">Iterations</span>
           <span className="s-value">{summary.total_iterations}</span>
         </div>
+        {summary.current_sim_time != null && (
+          <div className="summary-item">
+            <span className="s-label">Sim Time</span>
+            <span className="s-value">{Number(summary.current_sim_time).toExponential(3)}</span>
+          </div>
+        )}
         <div className="summary-item">
           <span className="s-label">Status</span>
           <span className={`s-value status-${summary.termination_status}`}>
@@ -185,12 +196,22 @@ export function PlotPanel({ summary, plots }) {
         </div>
       </div>
 
+      <div className="plots-toolbar">
+        <button
+          className={`btn-ghost btn-sm fade-toggle${fadingEnabled ? ' fade-toggle--on' : ''}`}
+          onClick={() => setFadingEnabled(v => !v)}
+          title="Toggle step fading on norm ratio plots"
+        >
+          {fadingEnabled ? 'Step Fading: On' : 'Step Fading: Off'}
+        </button>
+      </div>
+
       <div className="plot-grid">
         {Object.entries(plots).map(([key, fig]) => (
           <div key={key} className="plot-wrap">
             <div className="plot-label">{PLOT_LABELS[key] || key}</div>
             {NORM_PLOT_KEYS.has(key) ? (
-              <NormPlot fig={fig} theme={theme} />
+              <NormPlot fig={fig} theme={theme} fadingEnabled={fadingEnabled} />
             ) : (() => {
               const m = mergeLayout(fig, theme)
               return (

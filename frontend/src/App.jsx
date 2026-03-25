@@ -111,7 +111,7 @@ export default function App() {
         statuses={statuses}
         filters={filters}
         onFilterChange={setFilters}
-        onRefresh={() => loadJobs(true)}
+        onRefresh={() => { setHiddenJobIds(new Set()); setShowHidden(false); loadJobs(true) }}
         lastRefresh={lastRefresh}
         actionInProgress={actionInProgress}
         selectedJob={selectedJob}

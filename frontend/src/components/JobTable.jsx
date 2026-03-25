@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import './JobTable.css'
 
+const CHEVRON_DOWN = '▾'
+const CHEVRON_RIGHT = '▸'
+
 const COLUMNS = [
   { key: 'Server', label: 'Server' },
   { key: 'JobID', label: 'Job ID' },
@@ -21,6 +24,7 @@ function StatusBadge({ status }) {
 export default function JobTable({ jobs, selectedJob, onSelect, hiddenJobIds = new Set(), showHidden = false, onToggleHide }) {
   const [sortKey, setSortKey] = useState('Server')
   const [sortDir, setSortDir] = useState(1)
+  const [collapsed, setCollapsed] = useState(false)
 
   function handleSort(key) {
     if (key === sortKey) setSortDir(d => -d)
@@ -36,7 +40,9 @@ export default function JobTable({ jobs, selectedJob, onSelect, hiddenJobIds = n
   if (jobs.length === 0) {
     return (
       <div className="card job-table-empty">
-        <div className="card-header">Jobs (0)</div>
+        <div className="card-header">
+          <span>Jobs (0)</span>
+        </div>
         <div className="empty-msg">No jobs match the current filters.</div>
       </div>
     )
@@ -45,12 +51,21 @@ export default function JobTable({ jobs, selectedJob, onSelect, hiddenJobIds = n
   return (
     <div className="card job-table-card">
       <div className="card-header">
-        Jobs ({jobs.length})
-        {selectedJob && (
-          <span className="selected-hint">Selected: {selectedJob.JobID}</span>
-        )}
+        <div className="table-header-left">
+          <button
+            className="collapse-toggle"
+            onClick={() => setCollapsed(v => !v)}
+            title={collapsed ? 'Expand job table' : 'Collapse job table'}
+          >
+            {collapsed ? CHEVRON_RIGHT : CHEVRON_DOWN}
+          </button>
+          <span>Jobs ({jobs.length})</span>
+          {selectedJob && (
+            <span className="selected-hint">Selected: {selectedJob.JobID}</span>
+          )}
+        </div>
       </div>
-      <div className="table-wrap">
+      <div className={`table-wrap${collapsed ? ' table-wrap--collapsed' : ''}`}>
         <table className="job-table">
           <thead>
             <tr>

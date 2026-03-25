@@ -1,13 +1,40 @@
 .job-table-card { flex-shrink: 0; }
 
+/* Collapsible table */
+.table-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.collapse-toggle {
+  background: none;
+  border: none;
+  color: var(--primary-light);
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+.collapse-toggle:hover { color: var(--text-primary); }
+
+.table-wrap {
+  overflow-x: auto;
+  max-height: 600px;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  opacity: 1;
+}
+.table-wrap--collapsed {
+  max-height: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+}
+
 .job-table-empty .empty-msg {
   padding: 24px;
   text-align: center;
   color: var(--text-muted);
-}
-
-.table-wrap {
-  overflow-x: auto;
 }
 
 .job-table {
