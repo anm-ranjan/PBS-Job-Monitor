@@ -54,6 +54,15 @@ dashboard:
   # Lower = fresher data but more frequent file-system activity.
   messag_copy_interval: 30
 
+# Lightweight HTML status page.
+# When configured, a background thread writes a self-contained HTML summary of
+# all jobs to the given path during active hours (17:00–01:00 and 06:00–09:00),
+# at a random interval between 20 and 45 minutes.
+# Drop the file into a SharePoint-synced or network-share folder for off-LAN access.
+# Remove this section (or omit 'output_path') to disable.
+# status_page:
+#   output_path: 'C:\Users\Public\Documents\pbs_status.html'
+
 # META CAE Systems viewer integration.
 # Remove this section entirely (or omit 'executable') to disable the feature.
 # meta:

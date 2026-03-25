@@ -16,6 +16,7 @@ import yaml
 import os
 import sys
 import time
+import random
 import asyncio
 import json
 import shutil
@@ -203,6 +204,10 @@ class JobMonitor:
         if self._meta_exe:
             self._start_meta_watcher()
 
+        # Lightweight HTML status page writer (optional — disabled if not configured)
+        if self._status_page_path:
+            self._start_status_page_writer()
+
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file"""
         config_file = Path(config_path)
@@ -250,6 +255,10 @@ class JobMonitor:
 
         # Submit-time pending flags (windows_job_path → True), cleared on F transition
         self._pending_meta_on_finish: Dict[str, bool] = {}
+
+        # Lightweight HTML status page (optional)
+        sp_cfg = self.config.get("status_page", {})
+        self._status_page_path: Optional[str] = sp_cfg.get("output_path") or None
 
     def _setup_servers(self, servers_config: List[dict]) -> List[dict]:
         """Add username and key_file to server configurations"""
@@ -744,6 +753,314 @@ class JobMonitor:
             daemon=True,
         )
         t.start()
+
+    # ------------------------------------------------------------------
+    # Lightweight HTML status page writer
+    # ------------------------------------------------------------------
+
+    def _in_status_page_window(self) -> bool:
+        """
+        Return True if the current local time falls inside an active writing window.
+
+        Active windows:
+          - 17:00 – 01:00 (evening / overnight)
+          - 06:00 – 09:00 (morning)
+        """
+        h = datetime.now().hour + datetime.now().minute / 60.0
+        return (h >= 17.0 or h < 1.0) or (6.0 <= h < 9.0)
+
+    def _start_status_page_writer(self) -> None:
+        """Start the daemon thread that writes the HTML status page on a random schedule."""
+        t = threading.Thread(
+            target=self._status_page_writer_loop,
+            name="status-page-writer",
+            daemon=True,
+        )
+        t.start()
+        print(f"[status-page] Writer started → {self._status_page_path}")
+
+    def _status_page_writer_loop(self) -> None:
+        """
+        Daemon thread body.
+
+        Writes the status page immediately upon entering an active window, then
+        sleeps a random 20–45 minutes before the next write.  When outside all
+        windows the thread polls every 60 seconds so it wakes promptly at window
+        open without burning CPU.
+        """
+        while True:
+            try:
+                if self._in_status_page_window():
+                    self._write_status_page()
+                    sleep_sec = random.uniform(20 * 60, 45 * 60)
+                    print(
+                        f"[status-page] Next write in {sleep_sec / 60:.1f} min"
+                    )
+                    time.sleep(sleep_sec)
+                else:
+                    time.sleep(60)
+            except Exception as exc:
+                print(f"[status-page] Unexpected error: {exc}")
+                time.sleep(60)
+
+    def _write_status_page(self) -> None:
+        """Render the HTML and write it to the configured output path."""
+        try:
+            html = self._generate_status_html()
+            path = self._status_page_path
+            # Write atomically via a temp file next to the target
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(html)
+            os.replace(tmp, path)
+            print(
+                f"[status-page] Written at {datetime.now().strftime('%H:%M:%S')} → {path}"
+            )
+        except Exception as exc:
+            print(f"[status-page] Failed to write: {exc}")
+
+    def _generate_status_html(self) -> str:
+        """
+        Build a fully self-contained HTML status page.
+
+        Reads messag_react (or messag) for R/E/F jobs to extract current sim
+        time and step count via ConvergenceParser — no SSH required.
+        """
+        from convergence_plotter import ConvergenceParser
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Merge live + finished jobs (live takes priority by JobID)
+        live_jobs = list(self._jobs_cache)
+        finished_jobs = self._job_db.get_finished()
+        live_ids = {j.get("JobID") for j in live_jobs}
+        all_jobs = live_jobs + [j for j in finished_jobs if j.get("JobID") not in live_ids]
+
+        STATUS_ORDER = {"R": 0, "E": 1, "Q": 2, "F": 3}
+        all_jobs.sort(key=lambda j: STATUS_ORDER.get(j.get("Status", "F"), 9))
+
+        rows_html = []
+        for job in all_jobs:
+            job_id   = job.get("JobID", "N/A")
+            job_name = job.get("Job_Name", "N/A")
+            status   = job.get("Status", "N/A")
+            server   = job.get("Server", "N/A")
+            owner    = job.get("Owner", "N/A")
+            finished_at = job.get("finished_at", "")
+
+            sim_time_str  = "—"
+            steps_str     = "—"
+            term_str      = "—"
+            notes_str     = ""
+
+            if status in ("R", "E", "F"):
+                job_od = OrderedDict(job.items())
+                content = None
+                react_path = self.get_messag_react_path(job_od)
+                if react_path and os.path.isfile(react_path):
+                    try:
+                        with open(react_path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+                    except Exception:
+                        pass
+                if content is None:
+                    messag_path = self.get_messag_path(job_od)
+                    if messag_path and os.path.isfile(messag_path):
+                        try:
+                            with open(messag_path, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read()
+                        except Exception:
+                            pass
+
+                if content:
+                    try:
+                        parser = ConvergenceParser(content)
+                        parser.parse()
+                        summary = parser.get_summary()
+                        sim_t = summary.get("current_sim_time")
+                        sim_time_str = f"{sim_t:.4f}" if sim_t is not None else "—"
+                        steps_str = str(summary.get("total_steps") or "—")
+                        term_str  = summary.get("termination_status") or "—"
+                    except Exception:
+                        pass
+
+            if status == "F" and finished_at:
+                try:
+                    fa = datetime.fromisoformat(finished_at)
+                    notes_str = f"Finished {fa.strftime('%Y-%m-%d %H:%M')}"
+                except Exception:
+                    notes_str = finished_at
+
+            badge_class = f"badge-{status}" if status in ("R", "Q", "E", "F") else "badge-unk"
+            rows_html.append(f"""
+        <tr>
+          <td class="job-name">{self._html_esc(job_name)}</td>
+          <td class="mono">{self._html_esc(job_id)}</td>
+          <td><span class="badge {badge_class}">{status}</span></td>
+          <td>{self._html_esc(server)}</td>
+          <td class="mono">{sim_time_str}</td>
+          <td class="mono">{steps_str}</td>
+          <td>{self._html_esc(term_str)}</td>
+          <td class="notes">{self._html_esc(notes_str)}</td>
+        </tr>""")
+
+        rows = "\n".join(rows_html) if rows_html else (
+            '<tr><td colspan="8" class="empty">No jobs found.</td></tr>'
+        )
+
+        job_count = len(all_jobs)
+        r_count   = sum(1 for j in all_jobs if j.get("Status") == "R")
+        q_count   = sum(1 for j in all_jobs if j.get("Status") == "Q")
+        f_count   = sum(1 for j in all_jobs if j.get("Status") == "F")
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="300">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PBS Job Status — {now_str}</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px;
+    padding: 24px 32px 48px;
+    min-height: 100vh;
+  }}
+  header {{
+    border-bottom: 1px solid #21262d;
+    padding-bottom: 14px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    flex-wrap: wrap;
+  }}
+  h1 {{
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: #e6edf3;
+    letter-spacing: 0.02em;
+  }}
+  .gen-time {{
+    font-size: 0.8rem;
+    color: #8b949e;
+    font-family: 'Courier New', monospace;
+  }}
+  .summary-bar {{
+    display: flex;
+    gap: 18px;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+  }}
+  .stat-pill {{
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 0.78rem;
+    color: #8b949e;
+  }}
+  .stat-pill span {{ color: #e6edf3; font-weight: 600; }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    background: #0d1117;
+  }}
+  thead tr {{
+    border-bottom: 1px solid #30363d;
+  }}
+  th {{
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #8b949e;
+    white-space: nowrap;
+  }}
+  td {{
+    padding: 9px 12px;
+    border-bottom: 1px solid #161b22;
+    vertical-align: middle;
+  }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr:hover td {{ background: #161b22; }}
+  .job-name {{ color: #e6edf3; font-weight: 500; max-width: 260px; word-break: break-word; }}
+  .mono {{ font-family: 'Courier New', monospace; font-size: 0.85rem; color: #8b949e; }}
+  .notes {{ font-size: 0.8rem; color: #8b949e; }}
+  .empty {{ text-align: center; padding: 32px; color: #484f58; }}
+  .badge {{
+    display: inline-block;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    font-family: 'Courier New', monospace;
+  }}
+  .badge-R {{ background: #1a3a1a; color: #3fb950; border: 1px solid #238636; }}
+  .badge-Q {{ background: #2d2208; color: #d29922; border: 1px solid #9e6a03; }}
+  .badge-E {{ background: #3a1a1a; color: #f85149; border: 1px solid #da3633; }}
+  .badge-F {{ background: #1c1f24; color: #8b949e; border: 1px solid #30363d; }}
+  .badge-unk {{ background: #1c1f24; color: #8b949e; border: 1px solid #30363d; }}
+  footer {{
+    margin-top: 32px;
+    font-size: 0.72rem;
+    color: #484f58;
+    border-top: 1px solid #161b22;
+    padding-top: 12px;
+  }}
+</style>
+</head>
+<body>
+<header>
+  <h1>PBS Job Monitor</h1>
+  <span class="gen-time">Generated: {now_str} &nbsp;|&nbsp; Auto-refresh: 5 min</span>
+</header>
+<div class="summary-bar">
+  <div class="stat-pill">Total <span>{job_count}</span></div>
+  <div class="stat-pill">Running <span>{r_count}</span></div>
+  <div class="stat-pill">Queued <span>{q_count}</span></div>
+  <div class="stat-pill">Finished <span>{f_count}</span></div>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>Job Name</th>
+      <th>Job ID</th>
+      <th>Status</th>
+      <th>Server</th>
+      <th>Sim Time</th>
+      <th>Steps</th>
+      <th>Term. Status</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+{rows}
+  </tbody>
+</table>
+<footer>PBS Job Monitor v2.0 &nbsp;|&nbsp; Updates every 20–45 min during active hours (17:00–01:00, 06:00–09:00)</footer>
+</body>
+</html>"""
+
+    @staticmethod
+    def _html_esc(text: str) -> str:
+        """Minimal HTML escaping for safe insertion into table cells."""
+        if not text:
+            return ""
+        return (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
 
     def get_meta_status(self, job_id: str) -> dict:
         """Return current META status dict for the given job."""
