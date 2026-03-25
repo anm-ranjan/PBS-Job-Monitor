@@ -63,6 +63,9 @@ function mergeLayout(fig, theme) {
 // Keys that get step-based opacity + blinking current-position marker.
 const NORM_PLOT_KEYS = new Set(['displacement_norm', 'energy_norm'])
 
+// Keys that get per-bar opacity fading when step fading is enabled.
+const HISTOGRAM_PLOT_KEYS = new Set(['iterations_per_timestep', 'time_duration'])
+
 /**
  * Override trace opacity based on distance from the last (current) step.
  *   rank 0  → 1.00  (current step, full opacity)
@@ -81,6 +84,54 @@ function applyNormStepOpacity(traces) {
 
 function clearNormStepOpacity(traces) {
   return traces.map(trace => ({ ...trace, opacity: 1.0 }))
+}
+
+/**
+ * Apply per-bar opacity to histogram traces based on distance from the last bar.
+ *   rank 0  → 1.00  (current/latest step, fully opaque)
+ *   rank 1  → 0.50  (one step back)
+ *   rank 2+ → 0.05  (all older steps, nearly invisible)
+ */
+function applyHistogramStepOpacity(traces) {
+  return traces.map(trace => {
+    if (!trace.x) return trace
+    const n = trace.x.length
+    const opacities = trace.x.map((_, i) => {
+      const rank = n - 1 - i
+      if (rank === 0) return 1.0
+      if (rank === 1) return 0.50
+      return 0.05
+    })
+    return { ...trace, marker: { ...trace.marker, opacity: opacities } }
+  })
+}
+
+function clearHistogramStepOpacity(traces) {
+  return traces.map(trace => {
+    if (!trace.marker) return trace
+    const { opacity: _removed, ...markerRest } = trace.marker
+    return { ...trace, marker: markerRest }
+  })
+}
+
+function HistogramPlot({ fig, theme, fadingEnabled }) {
+  const processedFig = useMemo(() => {
+    const data = fadingEnabled
+      ? applyHistogramStepOpacity(fig.data)
+      : clearHistogramStepOpacity(fig.data)
+    return { ...fig, data }
+  }, [fig, fadingEnabled])
+
+  const merged = mergeLayout(processedFig, theme)
+  return (
+    <Plot
+      data={merged.data}
+      layout={merged.layout}
+      config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+      style={{ width: '100%' }}
+      useResizeHandler
+    />
+  )
 }
 
 /**
@@ -212,6 +263,8 @@ export function PlotPanel({ summary, plots }) {
             <div className="plot-label">{PLOT_LABELS[key] || key}</div>
             {NORM_PLOT_KEYS.has(key) ? (
               <NormPlot fig={fig} theme={theme} fadingEnabled={fadingEnabled} />
+            ) : HISTOGRAM_PLOT_KEYS.has(key) ? (
+              <HistogramPlot fig={fig} theme={theme} fadingEnabled={fadingEnabled} />
             ) : (() => {
               const m = mergeLayout(fig, theme)
               return (
