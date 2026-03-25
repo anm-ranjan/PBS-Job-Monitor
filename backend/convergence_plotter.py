@@ -296,15 +296,14 @@ class ConvergencePlotter:
         sim_times = []
         step_sizes = []
 
-        prev_time = None
         for step in self.data["timeSteps"]:
             steps.append(step["stepNumber"])
             iterations.append(len(step["iterations"]))
 
             t = self._safe_float(step.get("targetTime"))
             sim_times.append(t if t is not None else 0.0)
-            step_sizes.append((t - prev_time) if (t is not None and prev_time is not None) else 0.0)
-            prev_time = t
+            dt = self._safe_float(step.get("stepSize"))
+            step_sizes.append(dt if dt is not None else 0.0)
 
             status = step["convergenceStatus"]
             if status == "converged":
@@ -396,10 +395,9 @@ class ConvergencePlotter:
                     steps.append(step["stepNumber"])
                     durations.append(duration_sec)
                     t_cur = self._safe_float(step.get("targetTime"))
-                    t_prev = self._safe_float(prev_step.get("targetTime"))
                     sim_times_dur.append(t_cur if t_cur is not None else 0.0)
-                    _dt = (t_cur - t_prev) if (t_cur is not None and t_prev is not None) else 0.0
-                    step_sizes_dur.append(_dt)
+                    dt_dur = self._safe_float(step.get("stepSize"))
+                    step_sizes_dur.append(dt_dur if dt_dur is not None else 0.0)
 
                     status = step["convergenceStatus"]
                     if status == "converged":
@@ -485,12 +483,13 @@ class ConvergencePlotter:
         steps_to_plot = self.data["timeSteps"][-num_steps_to_plot:]
 
         # Precompute (targetTime, stepSize) for every step in the full list
+        # stepSize is read directly from "current step size =" in the messag file,
+        # so it is always correct — even for bisected/retried steps.
         all_steps = self.data["timeSteps"]
-        step_time_info: dict = {}  # stepNumber → (targetTime, dt)
-        for i, s in enumerate(all_steps):
+        step_time_info: dict = {}  # stepNumber → (targetTime, stepSize)
+        for s in all_steps:
             t = self._safe_float(s.get("targetTime"))
-            t_prev = self._safe_float(all_steps[i - 1].get("targetTime")) if i > 0 else None
-            dt = (t - t_prev) if (t is not None and t_prev is not None) else None
+            dt = self._safe_float(s.get("stepSize"))
             step_time_info[s["stepNumber"]] = (t, dt)
 
         for step in steps_to_plot:
