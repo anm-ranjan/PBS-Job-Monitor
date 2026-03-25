@@ -20,11 +20,6 @@ backend/temp.ses
 # ── Site config (sensitive — use config.yaml.example) ───
 backend/config.yaml
 
-# ── Images (use Logo.png.example or replace locally) ─────
-*.png
-*.PNG
-# Track the placeholder explicitly: git add -f Logo.png
-
 # ── Release archives ─────────────────────────────────────
 *.tar.gz
 *.zip

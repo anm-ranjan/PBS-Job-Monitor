@@ -83,12 +83,7 @@ All site-specific settings live in `backend/config.yaml` (not tracked in git —
 | `paths.linux_base_path` | Base path for user home directories on servers |
 | `meta.executable` | Path to `meta_post64.bat` — omit section to disable META integration |
 
-## Branding / Logo
-
-Place your organisation logo at `Logo.png` in the project root. This file is intentionally not tracked in git — the repository ships a plain white placeholder. The logo is used by the legacy Streamlit dashboard (`streamlit_dashboard.py`); the React frontend uses a CSS text logo.
-
 ## Notes
 
-- `streamlit_dashboard.py` is kept for reference only (the original v1 implementation). It is not used by the FastAPI stack.
 - `messag` files are never read directly by the backend. A background thread copies `messag` → `messag_react` every 30 s; all reads target the copy to avoid file-lock conflicts with LS-DYNA.
 - Queued jobs (Status=Q) may not report CPU/memory fields — this is normal PBS Pro behaviour.
