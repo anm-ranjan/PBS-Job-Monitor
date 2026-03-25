@@ -106,6 +106,40 @@ export function fetchParts(jobId, jobData) {
 }
 
 /**
+ * Discover plottable entries/variables in the job's binout file(s).
+ * @param {string} jobId
+ * @param {object} jobData  { Server, Job_Path }
+ * @returns {Promise<{entries: Array, found: boolean, cached: boolean}>}
+ */
+export function fetchBinoutEntries(jobId, jobData) {
+  const params = new URLSearchParams({
+    server: jobData.Server,
+    job_path: jobData.Job_Path,
+  })
+  return apiCall('GET', `/api/jobs/${encodeURIComponent(jobId)}/binout/entries?${params}`)
+}
+
+/**
+ * Fetch time-series data for one variable within a binout entry.
+ * @param {string} jobId
+ * @param {object} jobData  { Server, Job_Path }
+ * @param {string} entry       top-level binout entry (e.g. 'rcforc')
+ * @param {string} variable    variable name within the entry (e.g. 'x_force')
+ * @param {string|null} ids    comma-separated entity IDs to filter (null = all)
+ * @returns {Promise<{time: number[], series: Array<{id: string, values: number[]}>}>}
+ */
+export function fetchBinoutData(jobId, jobData, entry, variable, ids) {
+  const params = new URLSearchParams({
+    server: jobData.Server,
+    job_path: jobData.Job_Path,
+    entry,
+    variable,
+  })
+  if (ids) params.set('ids', ids)
+  return apiCall('GET', `/api/jobs/${encodeURIComponent(jobId)}/binout/data?${params}`)
+}
+
+/**
  * Fetch the optimal DTMAX load-curve points for a finished job.
  * @param {string} jobId
  * @param {object} jobData  { Server, Job_Path }
