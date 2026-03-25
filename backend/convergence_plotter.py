@@ -294,11 +294,17 @@ class ConvergencePlotter:
         iterations = []
         colors = []
         sim_times = []
+        step_sizes = []
 
+        prev_time = None
         for step in self.data["timeSteps"]:
             steps.append(step["stepNumber"])
             iterations.append(len(step["iterations"]))
-            sim_times.append(self._safe_float(step.get("targetTime")) or 0.0)
+
+            t = self._safe_float(step.get("targetTime"))
+            sim_times.append(t if t is not None else 0.0)
+            step_sizes.append((t - prev_time) if (t is not None and prev_time is not None) else 0.0)
+            prev_time = t
 
             status = step["convergenceStatus"]
             if status == "converged":
@@ -317,11 +323,12 @@ class ConvergencePlotter:
                 marker_line_width=0.5,
                 text=iterations,
                 textposition="outside",
-                customdata=sim_times,
+                customdata=list(zip(sim_times, step_sizes)),
                 hovertemplate=(
                     "Step: %{x}<br>"
                     "Iterations: %{y}<br>"
-                    "Sim Time: %{customdata:.4g}"
+                    "Sim Time: %{customdata[0]:.4g}<br>"
+                    "Step Size (dt): %{customdata[1]:.4g}"
                     "<extra></extra>"
                 ),
             )
@@ -361,6 +368,7 @@ class ConvergencePlotter:
         durations = []
         colors = []
         sim_times_dur = []
+        step_sizes_dur = []
 
         for i, step in enumerate(self.data["timeSteps"]):
             if i == 0:
@@ -387,7 +395,11 @@ class ConvergencePlotter:
 
                     steps.append(step["stepNumber"])
                     durations.append(duration_sec)
-                    sim_times_dur.append(self._safe_float(step.get("targetTime")) or 0.0)
+                    t_cur = self._safe_float(step.get("targetTime"))
+                    t_prev = self._safe_float(prev_step.get("targetTime"))
+                    sim_times_dur.append(t_cur if t_cur is not None else 0.0)
+                    _dt = (t_cur - t_prev) if (t_cur is not None and t_prev is not None) else 0.0
+                    step_sizes_dur.append(_dt)
 
                     status = step["convergenceStatus"]
                     if status == "converged":
@@ -407,11 +419,12 @@ class ConvergencePlotter:
                     marker_color=colors,
                     marker_line_color="black",
                     marker_line_width=0.5,
-                    customdata=sim_times_dur,
+                    customdata=list(zip(sim_times_dur, step_sizes_dur)),
                     hovertemplate=(
                         "Step: %{x}<br>"
                         "Duration: %{y:.1f}s<br>"
-                        "Sim Time: %{customdata:.4g}"
+                        "Sim Time: %{customdata[0]:.4g}<br>"
+                        "Step Size (dt): %{customdata[1]:.4g}"
                         "<extra></extra>"
                     ),
                 )
@@ -471,6 +484,15 @@ class ConvergencePlotter:
         num_steps_to_plot = min(10, len(self.data["timeSteps"]))
         steps_to_plot = self.data["timeSteps"][-num_steps_to_plot:]
 
+        # Precompute (targetTime, stepSize) for every step in the full list
+        all_steps = self.data["timeSteps"]
+        step_time_info: dict = {}  # stepNumber → (targetTime, dt)
+        for i, s in enumerate(all_steps):
+            t = self._safe_float(s.get("targetTime"))
+            t_prev = self._safe_float(all_steps[i - 1].get("targetTime")) if i > 0 else None
+            dt = (t - t_prev) if (t is not None and t_prev is not None) else None
+            step_time_info[s["stepNumber"]] = (t, dt)
+
         for step in steps_to_plot:
             if not step["iterations"]:
                 continue
@@ -486,8 +508,17 @@ class ConvergencePlotter:
                 continue
 
             x, y = zip(*points)
-            label = f"Step {step['stepNumber']}"
+            t_val, dt_val = step_time_info.get(step["stepNumber"], (None, None))
+
+            # Build compact legend label including sim time
+            t_str = f"  t={t_val:.3g}" if t_val is not None else ""
+            label = f"Step {step['stepNumber']}{t_str}"
             alpha = 0.7 if step["convergenceStatus"] == "converged" else 0.4
+
+            # Per-point customdata: [sim_time, step_size] — same value repeated
+            n_pts = len(x)
+            cd = [[t_val if t_val is not None else 0.0,
+                   dt_val if dt_val is not None else 0.0]] * n_pts
 
             fig.add_trace(
                 go.Scatter(
@@ -498,6 +529,15 @@ class ConvergencePlotter:
                     line=dict(width=2),
                     marker=dict(size=6),
                     opacity=alpha,
+                    customdata=cd,
+                    hovertemplate=(
+                        f"Step {step['stepNumber']}<br>"
+                        "Iter: %{x}<br>"
+                        "Norm: %{y:.4g}<br>"
+                        "Sim Time: %{customdata[0]:.4g}<br>"
+                        "Step Size (dt): %{customdata[1]:.4g}"
+                        "<extra></extra>"
+                    ),
                 )
             )
 
