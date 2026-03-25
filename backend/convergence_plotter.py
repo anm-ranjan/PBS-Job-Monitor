@@ -228,7 +228,10 @@ class ConvergenceParser:
     def get_summary(self) -> Dict[str, Any]:
         """Get summary statistics"""
         last_step = self.data["timeSteps"][-1] if self.data["timeSteps"] else None
-        current_sim_time = self._safe_float(last_step.get("targetTime")) if last_step else None
+        try:
+            current_sim_time = float(last_step.get("targetTime")) if last_step else None
+        except (TypeError, ValueError):
+            current_sim_time = None
         return {
             "hostname": self.data["hostname"],
             "start_date": self.data["simulationStart"]["date"],
