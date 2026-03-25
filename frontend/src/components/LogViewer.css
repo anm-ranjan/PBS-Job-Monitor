@@ -11,26 +11,32 @@
   gap: 16px;
   flex-wrap: wrap;
   padding: 8px 12px;
-  background: rgba(0,0,0,0.2);
+  background: rgba(0, 0, 0, 0.25);
   border-radius: var(--radius);
+  border: 1px solid var(--border);
 }
 
 .log-status {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--text-secondary);
+  letter-spacing: 0.2px;
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.dot.green { background: var(--success); box-shadow: 0 0 4px var(--success); }
-.dot.red { background: var(--error); }
+.dot.green {
+  background: var(--success);
+  box-shadow: 0 0 5px var(--success), 0 0 2px var(--success);
+}
+.dot.red  { background: var(--error); }
 .dot.grey { background: var(--text-muted); }
 
 .log-controls {
@@ -44,13 +50,17 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 11px;
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
 }
 
 .log-size {
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: 10px;
   color: var(--text-muted);
-  font-family: monospace;
+  letter-spacing: 0.2px;
 }
 
 .log-pre {
@@ -59,12 +69,13 @@
   background: var(--log-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
-  font-family: 'Consolas', 'Courier New', monospace;
+  padding: 14px 16px;
+  font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
   color: var(--log-color);
   white-space: pre-wrap;
   word-break: break-all;
   min-height: 300px;
+  letter-spacing: 0.2px;
 }

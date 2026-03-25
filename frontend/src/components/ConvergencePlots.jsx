@@ -14,19 +14,19 @@ const PLOT_LABELS = {
 
 const DARK_LAYOUT = {
   paper_bgcolor: 'rgba(0,0,0,0)',
-  plot_bgcolor: 'rgba(15,25,35,0.6)',
-  font: { color: '#e0e8ef', family: 'Segoe UI, system-ui, sans-serif', size: 12 },
-  xaxis: { gridcolor: '#1e3a52', zerolinecolor: '#1e3a52' },
-  yaxis: { gridcolor: '#1e3a52', zerolinecolor: '#1e3a52' },
+  plot_bgcolor: 'rgba(10,18,30,0.7)',
+  font: { color: '#dce8f5', family: 'DM Mono, Consolas, monospace', size: 11 },
+  xaxis: { gridcolor: '#101e30', zerolinecolor: '#101e30' },
+  yaxis: { gridcolor: '#101e30', zerolinecolor: '#101e30' },
   margin: { l: 50, r: 50, t: 60, b: 50 },
 }
 
 const LIGHT_LAYOUT = {
   paper_bgcolor: 'rgba(0,0,0,0)',
-  plot_bgcolor: 'rgba(248,250,252,0.85)',
-  font: { color: '#1a2733', family: 'Segoe UI, system-ui, sans-serif', size: 12 },
-  xaxis: { gridcolor: '#d0d8e0', zerolinecolor: '#aab4bc', tickfont: { color: '#1a2733' } },
-  yaxis: { gridcolor: '#d0d8e0', zerolinecolor: '#aab4bc', tickfont: { color: '#1a2733' } },
+  plot_bgcolor: 'rgba(248,250,252,0.9)',
+  font: { color: '#0e1e2e', family: 'DM Mono, Consolas, monospace', size: 11 },
+  xaxis: { gridcolor: '#d0dce8', zerolinecolor: '#b8cad8', tickfont: { color: '#0e1e2e' } },
+  yaxis: { gridcolor: '#d0dce8', zerolinecolor: '#b8cad8', tickfont: { color: '#0e1e2e' } },
   margin: { l: 50, r: 50, t: 60, b: 50 },
 }
 

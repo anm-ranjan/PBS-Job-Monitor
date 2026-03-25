@@ -1,78 +1,101 @@
 .plots-msg {
-  padding: 24px;
+  padding: 28px;
   text-align: center;
   color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.3px;
 }
 .plots-msg.error { color: var(--error); }
 
 .plots-updated {
   padding: 4px 12px;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: 10px;
   color: var(--text-muted);
   text-align: right;
   margin-bottom: 8px;
+  letter-spacing: 0.3px;
 }
 
+/* ─── Summary strip ──────────────────────────────────────────── */
 .summary-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
-  padding: 12px;
-  background: rgba(0,0,0,0.2);
+  gap: 0;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  margin-bottom: 16px;
+  overflow: hidden;
 }
 
 .summary-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  padding: 10px 16px;
+  border-right: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.2);
+  flex: 1;
+  min-width: 80px;
+  transition: background 0.15s;
 }
+.summary-item:last-child { border-right: none; }
+.summary-item:hover { background: rgba(14, 116, 144, 0.06); }
 
 .s-label {
-  font-size: 10px;
+  font-family: var(--font-display);
+  font-size: 9px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.2px;
   color: var(--text-muted);
 }
 
 .s-value {
+  font-family: var(--font-mono);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-primary);
 }
 .s-value.success { color: var(--success); }
-.s-value.danger { color: var(--error); }
-.s-value.status-normal { color: var(--success); }
-.s-value.status-error { color: var(--error); }
+.s-value.danger  { color: var(--error); }
+.s-value.status-normal      { color: var(--success); }
+.s-value.status-error       { color: var(--error); }
 .s-value.status-in-progress { color: var(--warning); }
 
+/* ─── Toolbar (fading toggle) ────────────────────────────────── */
 .plots-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .fade-toggle {
-  font-size: 11px;
-  padding: 3px 10px;
-  border-radius: 3px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  border-radius: 2px;
   color: var(--text-muted);
-  border-color: var(--border);
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  border-color: var(--border-mid);
+  transition: all 0.15s;
 }
 .fade-toggle--on {
-  color: var(--primary-light);
-  border-color: var(--primary-teal);
-  background: rgba(45, 158, 168, 0.08);
+  color: var(--accent);
+  border-color: rgba(249, 115, 22, 0.4);
+  background: rgba(249, 115, 22, 0.07);
 }
-.fade-toggle:hover { color: var(--text-primary); }
+.fade-toggle:hover { color: var(--text-primary); border-color: var(--primary-teal); }
 
+/* ─── Plot grid ──────────────────────────────────────────────── */
 .plot-grid {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .plot-wrap {
@@ -80,14 +103,18 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  transition: border-color 0.2s;
 }
+.plot-wrap:hover { border-color: var(--border-mid); }
 
 .plot-label {
-  padding: 8px 12px;
-  font-size: 11px;
+  padding: 7px 14px;
+  font-family: var(--font-display);
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.2px;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
+  background: linear-gradient(90deg, rgba(14, 116, 144, 0.06) 0%, transparent 60%);
 }
