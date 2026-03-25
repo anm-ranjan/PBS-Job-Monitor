@@ -408,6 +408,82 @@ async def get_optimal_timestep(
         raise HTTPException(status_code=500, detail=f"Timestep computation failed: {exc}")
 
 
+@app.get("/api/jobs/{job_id}/parts")
+async def get_parts_list(
+    job_id: str,
+    server: str = Query(...),
+    job_path: str = Query(...),
+):
+    """
+    Return part IDs and titles for a job.
+
+    First call: reads d3plot/d3plot01 with lasso-python, writes parts.json
+    into the Simulation directory, then returns the data.
+    Subsequent calls: reads parts.json directly — lasso is never invoked again.
+
+    Returns: { parts: [ { id: int, title: str } ], cached: bool }
+    """
+    monitor = get_monitor()
+    job = _make_job_od(server, job_id, job_path)
+
+    sim_dir = monitor.get_sim_dir(job)
+    if not sim_dir:
+        raise HTTPException(status_code=404, detail="Simulation directory not found.")
+
+    parts_json_path = os.path.join(sim_dir, "parts.json")
+
+    # Fast path — return cached JSON if it already exists
+    if os.path.isfile(parts_json_path):
+        try:
+            with open(parts_json_path, "r", encoding="utf-8") as f:
+                parts = json.load(f)
+            return {"parts": parts, "cached": True}
+        except Exception as exc:
+            # Corrupted cache — fall through to regenerate
+            pass
+
+    # Slow path — run lasso-python and write parts.json
+    d3plot_path = os.path.join(sim_dir, "d3plot")
+    d3plot01_path = os.path.join(sim_dir, "d3plot01")
+    if not os.path.isfile(d3plot_path) or not os.path.isfile(d3plot01_path):
+        raise HTTPException(
+            status_code=404,
+            detail="d3plot / d3plot01 not found in Simulation directory.",
+        )
+
+    try:
+        from lasso.dyna import D3plot, ArrayType  # lazy import — optional dependency
+
+        d3 = D3plot(d3plot_path, state_filter={0})
+        part_ids      = d3.arrays.get(ArrayType.part_ids)
+        part_titles   = d3.arrays.get(ArrayType.part_titles)
+        part_mat_type = d3.arrays.get(ArrayType.part_material_type)  # may be None
+
+        mat_list = part_mat_type.tolist() if part_mat_type is not None else None
+
+        parts = []
+        if part_ids is not None and part_titles is not None:
+            for i, (pid, raw_title) in enumerate(zip(part_ids.tolist(), part_titles)):
+                if isinstance(raw_title, (bytes, bytearray)):
+                    title = raw_title.decode("utf-8", errors="replace").strip()
+                else:
+                    title = str(raw_title).strip()
+                mat = mat_list[i] if mat_list is not None else "-"
+                parts.append({"id": pid, "title": title, "material_type": mat})
+
+        with open(parts_json_path, "w", encoding="utf-8") as f:
+            json.dump(parts, f)
+
+        return {"parts": parts, "cached": False}
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="lasso-python is not installed in the backend environment.",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read d3plot: {exc}")
+
+
 @app.get("/api/jobs/{job_id}/log/stream")
 async def stream_log(
     job_id: str,

@@ -3,11 +3,12 @@ import ConvergencePlots from './ConvergencePlots.jsx'
 import LogViewer from './LogViewer.jsx'
 import OptimalTimestep from './OptimalTimestep.jsx'
 import MetaViewer from './MetaViewer.jsx'
+import PartsList from './PartsList.jsx'
 import './JobDetail.css'
 
 const TABS_Q   = ['Convergence Plots', 'Live Log']
-const TABS_R_E = ['Convergence Plots', 'Live Log', 'META Viewer']
-const TABS_F   = ['Convergence Plots', 'Optimal Timestep', 'Live Log', 'META Viewer']
+const TABS_R_E = ['Convergence Plots', 'Live Log', 'List Parts', 'META Viewer']
+const TABS_F   = ['Convergence Plots', 'Optimal Timestep', 'Live Log', 'List Parts', 'META Viewer']
 
 export default function JobDetail({ job, onClose }) {
   const [activeTab, setActiveTab] = useState('Convergence Plots')
@@ -58,6 +59,9 @@ export default function JobDetail({ job, onClose }) {
         )}
         {activeTab === 'Live Log' && (
           <LogViewer job={job} />
+        )}
+        {activeTab === 'List Parts' && (
+          <PartsList job={job} />
         )}
         {activeTab === 'META Viewer' && (
           <MetaViewer job={job} />

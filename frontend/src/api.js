@@ -92,6 +92,20 @@ export function fetchPlots(jobId, jobData) {
 }
 
 /**
+ * Fetch part IDs and titles from the d3plot in the job's Simulation directory.
+ * @param {string} jobId
+ * @param {object} jobData  { Server, Job_Path }
+ * @returns {Promise<{parts: Array<{id: number, title: string}>}>}
+ */
+export function fetchParts(jobId, jobData) {
+  const params = new URLSearchParams({
+    server: jobData.Server,
+    job_path: jobData.Job_Path,
+  })
+  return apiCall('GET', `/api/jobs/${encodeURIComponent(jobId)}/parts?${params}`)
+}
+
+/**
  * Fetch the optimal DTMAX load-curve points for a finished job.
  * @param {string} jobId
  * @param {object} jobData  { Server, Job_Path }
