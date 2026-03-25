@@ -14,7 +14,7 @@ A **FastAPI + React** dashboard for submitting, killing, and monitoring implicit
 - **Job termination** — `qdel` with optional simulation directory deletion
 - **Job database** — finished jobs (Status=F) are persisted across server restarts in `job_database.json`
 - **META CAE viewer integration** — generate MetaDB files in batch and launch the META post-processor (optional, gated on `config.yaml`)
-- **Collapsible sidebar** — IPA-themed UI with smooth collapse/expand transition
+- **Collapsible sidebar** — themed UI with smooth collapse/expand transition
 - **Auto-refresh** — job list refreshes every 20 s; convergence plots refresh every 60 s while a job is selected
 
 ## Architecture
