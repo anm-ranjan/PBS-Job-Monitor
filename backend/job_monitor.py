@@ -267,6 +267,7 @@ class JobMonitor:
         # Server load logger (optional)
         ll_cfg = self.config.get("load_logger", {})
         self._load_logger_dir: Optional[str] = ll_cfg.get("output_dir") or None
+        self._load_logger_secondary_dir: Optional[str] = ll_cfg.get("secondary_dir") or None
         self._load_logger_interval: int = int(ll_cfg.get("interval_minutes", 10)) * 60
         # In-memory set of finished job IDs whose finish-event has already been logged.
         # Reset on restart (acceptable: a duplicate event will be written, not a missing one).
@@ -1281,7 +1282,8 @@ class JobMonitor:
         }
 
     def _write_load_snapshot(self) -> None:
-        """Collect one snapshot and append it as a single line to today's NDJSON file."""
+        """Collect one snapshot and append it as a single line to today's NDJSON file.
+        If a secondary_dir is configured the same line is also appended there."""
         try:
             record = self._collect_load_snapshot()
         except Exception as exc:
@@ -1290,12 +1292,14 @@ class JobMonitor:
 
         date_str = datetime.now().strftime("%Y-%m-%d")
         filename = f"server_load_{date_str}.jsonl"
-        filepath = os.path.join(self._load_logger_dir, filename)
+        line = json.dumps(record, default=str) + "\n"
 
+        # Primary path
+        filepath = os.path.join(self._load_logger_dir, filename)
         try:
             os.makedirs(self._load_logger_dir, exist_ok=True)
             with open(filepath, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, default=str) + "\n")
+                fh.write(line)
         except Exception as exc:
             print(f"[load-logger] Failed to write snapshot to {filepath}: {exc}")
             return
@@ -1306,6 +1310,16 @@ class JobMonitor:
             f"[load-logger] Snapshot written → {filename} "
             f"({n_jobs} jobs, {n_events} finish events)"
         )
+
+        # Secondary (backup) path — failure here is non-fatal
+        if self._load_logger_secondary_dir:
+            sec_path = os.path.join(self._load_logger_secondary_dir, filename)
+            try:
+                os.makedirs(self._load_logger_secondary_dir, exist_ok=True)
+                with open(sec_path, "a", encoding="utf-8") as fh:
+                    fh.write(line)
+            except Exception as exc:
+                print(f"[load-logger] Failed to write secondary snapshot to {sec_path}: {exc}")
 
     def _load_logger_loop(self) -> None:
         """Daemon thread body: write a load snapshot every `_load_logger_interval` seconds."""
