@@ -831,7 +831,9 @@ class JobMonitor:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Merge live + finished jobs (live takes priority by JobID)
-        live_jobs = list(self._jobs_cache)
+        # Use get_jobs_cached() so stale cache is refreshed and finished jobs
+        # are properly detected and marked F in the DB before we render.
+        live_jobs = list(self.get_jobs_cached())
         finished_jobs = self._job_db.get_finished()
         live_ids = {j.get("JobID") for j in live_jobs}
         all_jobs = live_jobs + [j for j in finished_jobs if j.get("JobID") not in live_ids]
@@ -848,10 +850,10 @@ class JobMonitor:
             owner    = job.get("Owner", "N/A")
             finished_at = job.get("finished_at", "")
 
-            sim_time_str  = "—"
-            steps_str     = "—"
-            term_str      = "—"
-            notes_str     = ""
+            sim_time_str   = "—"
+            step_size_str  = "—"
+            term_str       = "—"
+            notes_str      = ""
 
             if status in ("R", "E", "F"):
                 job_od = OrderedDict(job.items())
@@ -879,10 +881,10 @@ class JobMonitor:
                         summary = parser.get_summary()
                         sim_t = summary.get("current_sim_time")
                         sim_time_str = f"{sim_t:.4f}" if sim_t is not None else "—"
-                        steps_str = str(summary.get("total_steps") or "—")
-                        term_str  = summary.get("termination_status") or "—"
+                        term_str     = summary.get("termination_status") or "—"
                     except Exception:
                         pass
+                    step_size_str = self._parse_step_size(content)
 
             if status == "F" and finished_at:
                 try:
@@ -899,7 +901,7 @@ class JobMonitor:
           <td><span class="badge {badge_class}">{status}</span></td>
           <td>{self._html_esc(server)}</td>
           <td class="mono">{sim_time_str}</td>
-          <td class="mono">{steps_str}</td>
+          <td class="mono">{step_size_str}</td>
           <td>{self._html_esc(term_str)}</td>
           <td class="notes">{self._html_esc(notes_str)}</td>
         </tr>""")
@@ -1036,7 +1038,7 @@ class JobMonitor:
       <th>Status</th>
       <th>Server</th>
       <th>Sim Time</th>
-      <th>Steps</th>
+      <th>Step Size (dt)</th>
       <th>Term. Status</th>
       <th>Notes</th>
     </tr>
@@ -1048,6 +1050,33 @@ class JobMonitor:
 <footer>PBS Job Monitor v2.0 &nbsp;|&nbsp; Updates every 20–45 min during active hours (17:00–01:00, 06:00–09:00)</footer>
 </body>
 </html>"""
+
+    @staticmethod
+    def _parse_step_size(content: str) -> str:
+        """
+        Find the last 'BEGIN implicit' marker in the messag content, then
+        return the 'current step size' value from the line 3 positions below it.
+
+        Format in messag:
+            BEGIN implicit statics  step  N t= X.XXE+XX   <date>
+            ====================================================
+                            time =  X.XXE+XX
+              current step size =  X.XXE+XX          ← 3 lines below
+        """
+        lines = content.splitlines()
+        last_begin_idx = None
+        for i, line in enumerate(lines):
+            if "BEGIN implicit" in line:
+                last_begin_idx = i
+        if last_begin_idx is None:
+            return "—"
+        target_idx = last_begin_idx + 3
+        if target_idx >= len(lines):
+            return "—"
+        target_line = lines[target_idx]
+        if "current step size" in target_line and "=" in target_line:
+            return target_line.split("=", 1)[-1].strip()
+        return "—"
 
     @staticmethod
     def _html_esc(text: str) -> str:

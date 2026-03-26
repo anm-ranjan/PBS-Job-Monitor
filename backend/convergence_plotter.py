@@ -111,17 +111,37 @@ class ConvergenceParser:
                     step_data["startTime"]["time"] = match.group(2)
                     break
 
-        for offset in range(10):
-            if start_idx + offset < len(lines):
+        # targetTime: read from the BEGIN implicit line itself ("t= X.XXE+XX").
+        # This is unambiguous and avoids picking up stray "time =" matches.
+        begin_line = lines[start_idx] if start_idx < len(lines) else ""
+        m = re.search(r"\bt=\s*([\d.E+-]+)", begin_line)
+        if m:
+            step_data["targetTime"] = m.group(1)
+
+        # stepSize: always 3 lines below BEGIN implicit ("current step size = X").
+        # Exact offset matches the invariant described in the messag format.
+        step_size_idx = start_idx + 3
+        if step_size_idx < len(lines):
+            ss_line = lines[step_size_idx]
+            if "current step size" in ss_line:
+                m = re.search(r"current step size\s+=\s+([\d.E+-]+)", ss_line)
+                if m:
+                    step_data["stepSize"] = m.group(1)
+
+        # Fallback: fuzzy scan if exact positions failed (e.g. different LS-DYNA versions)
+        if step_data["targetTime"] is None or step_data["stepSize"] is None:
+            for offset in range(10):
+                if start_idx + offset >= len(lines):
+                    break
                 line = lines[start_idx + offset]
-                if "time =" in line:
-                    match = re.search(r"time\s+=\s+([\d.E+-]+)", line)
-                    if match:
-                        step_data["targetTime"] = match.group(1)
-                if "current step size" in line:
-                    match = re.search(r"current step size\s+=\s+([\d.E+-]+)", line)
-                    if match:
-                        step_data["stepSize"] = match.group(1)
+                if step_data["targetTime"] is None and "time =" in line:
+                    mm = re.search(r"time\s+=\s+([\d.E+-]+)", line)
+                    if mm:
+                        step_data["targetTime"] = mm.group(1)
+                if step_data["stepSize"] is None and "current step size" in line:
+                    mm = re.search(r"current step size\s+=\s+([\d.E+-]+)", line)
+                    if mm:
+                        step_data["stepSize"] = mm.group(1)
 
         i = start_idx
         max_search = min(start_idx + 10000, len(lines))
