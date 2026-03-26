@@ -26,6 +26,8 @@ backend/config.yaml
 
 # ── Claude Code local settings ───────────────────────────
 .claude/settings.local.json
+CLAUDE.md
+Pipfile
 
 # ── OS / editor noise ───────────────────────────────────
 .DS_Store

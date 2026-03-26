@@ -63,6 +63,21 @@ dashboard:
 # status_page:
 #   output_path: 'C:\Users\Public\Documents\pbs_status.html'
 
+# Server load logger.
+# When configured, a background thread writes one NDJSON record every
+# `interval_minutes` (default 10) to a daily file named
+# `server_load_YYYY-MM-DD.jsonl` in the given directory.
+# Each record contains:
+#   - timestamp (ISO 8601)
+#   - snapshot: per-server and global CPU/memory aggregates
+#   - jobs: full per-job list (CPUs, memory in GB, walltime elapsed) — PBS data
+#           only, consistent across all users regardless of drive/file access
+#   - events: job_finished records with sim_duration_s (first_seen → finished_at)
+# Remove this section (or omit 'output_dir') to disable.
+# load_logger:
+#   output_dir: 'C:\Users\Public\Documents\pbs_load_logs'
+#   interval_minutes: 10
+
 # META CAE Systems viewer integration.
 # Remove this section entirely (or omit 'executable') to disable the feature.
 # meta:

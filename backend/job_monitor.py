@@ -208,6 +208,10 @@ class JobMonitor:
         if self._status_page_path:
             self._start_status_page_writer()
 
+        # Server load logger (optional — disabled if not configured)
+        if self._load_logger_dir:
+            self._start_load_logger()
+
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file"""
         config_file = Path(config_path)
@@ -259,6 +263,14 @@ class JobMonitor:
         # Lightweight HTML status page (optional)
         sp_cfg = self.config.get("status_page", {})
         self._status_page_path: Optional[str] = sp_cfg.get("output_path") or None
+
+        # Server load logger (optional)
+        ll_cfg = self.config.get("load_logger", {})
+        self._load_logger_dir: Optional[str] = ll_cfg.get("output_dir") or None
+        self._load_logger_interval: int = int(ll_cfg.get("interval_minutes", 10)) * 60
+        # In-memory set of finished job IDs whose finish-event has already been logged.
+        # Reset on restart (acceptable: a duplicate event will be written, not a missing one).
+        self._load_logger_finished_logged: Set[str] = set()
 
     def _setup_servers(self, servers_config: List[dict]) -> List[dict]:
         """Add username and key_file to server configurations"""
@@ -1077,6 +1089,245 @@ class JobMonitor:
         if "current step size" in target_line and "=" in target_line:
             return target_line.split("=", 1)[-1].strip()
         return "—"
+
+    # ------------------------------------------------------------------
+    # Server load logger
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_memory_gb(mem_str: str) -> Optional[float]:
+        """
+        Convert a PBS memory string to gigabytes.
+
+        PBS reports memory as e.g. '192gb', '4096mb', '1024kb', '512000kb'.
+        Returns None if the string cannot be parsed.
+        """
+        if not mem_str or mem_str == "N/A":
+            return None
+        s = mem_str.strip().lower()
+        try:
+            if s.endswith("gb"):
+                return float(s[:-2])
+            if s.endswith("mb"):
+                return float(s[:-2]) / 1024.0
+            if s.endswith("kb"):
+                return float(s[:-2]) / (1024.0 ** 2)
+            if s.endswith("b"):
+                return float(s[:-1]) / (1024.0 ** 3)
+            # Bare number — assume bytes
+            return float(s) / (1024.0 ** 3)
+        except ValueError:
+            return None
+
+    def _collect_load_snapshot(self) -> dict:
+        """
+        Build one complete load snapshot dict from PBS data only.
+
+        Data source is exclusively the live PBS job list (via get_jobs_cached).
+        No messag/messag_react files are read, so all jobs from all users are
+        treated consistently regardless of drive mapping or file accessibility.
+
+        Called from the logger thread every `_load_logger_interval` seconds.
+        Returns a dict that will be serialised as a single NDJSON line.
+        """
+        now = datetime.now()
+        ts = now.isoformat()
+
+        # ── live jobs (PBS data only) ─────────────────────────────────────
+        live_jobs = list(self.get_jobs_cached())
+
+        # ── server-level aggregates ───────────────────────────────────────
+        server_map: Dict[str, dict] = {}
+        for srv in self.servers:
+            server_map[srv["name"]] = {
+                "name": srv["name"],
+                "hostname": srv["hostname"],
+                "jobs_R": 0, "jobs_Q": 0, "jobs_E": 0,
+                "cpus_used": 0,
+                "memory_used_gb": 0.0,
+            }
+
+        job_records = []
+        for job in live_jobs:
+            status = job.get("Status", "N/A")
+            srv_name = job.get("Server", "")
+            cpus_raw = job.get("CPUs", "N/A")
+            mem_raw = job.get("Memory", "N/A")
+            job_id = job.get("JobID", "N/A")
+
+            try:
+                cpus = int(cpus_raw) if cpus_raw not in (None, "N/A") else 0
+            except (ValueError, TypeError):
+                cpus = 0
+            mem_gb = self._parse_memory_gb(mem_raw)
+
+            # Per-server counters (R and E consume CPUs/memory; Q is just queued)
+            if srv_name in server_map:
+                agg = server_map[srv_name]
+                if status == "R":
+                    agg["jobs_R"] += 1
+                    agg["cpus_used"] += cpus
+                    if mem_gb is not None:
+                        agg["memory_used_gb"] += mem_gb
+                elif status == "Q":
+                    agg["jobs_Q"] += 1
+                elif status == "E":
+                    agg["jobs_E"] += 1
+                    agg["cpus_used"] += cpus
+                    if mem_gb is not None:
+                        agg["memory_used_gb"] += mem_gb
+
+            # Timing fields from job DB (monitor-side timestamps, not PBS)
+            db_entry = self._job_db.get(job_id) or {}
+            first_seen = db_entry.get("first_seen")
+            last_seen = db_entry.get("last_seen")
+
+            elapsed_s: Optional[float] = None
+            if first_seen:
+                try:
+                    elapsed_s = (now - datetime.fromisoformat(first_seen)).total_seconds()
+                except Exception:
+                    pass
+
+            # Determine server hostname for this job
+            srv_hostname: Optional[str] = None
+            for s in self.servers:
+                if s["name"] == srv_name:
+                    srv_hostname = s["hostname"]
+                    break
+
+            rec = {
+                "job_id": job_id,
+                "job_name": job.get("Job_Name", "N/A"),
+                "owner": job.get("Owner", "N/A"),
+                "server": srv_name,
+                "server_hostname": srv_hostname,
+                "status": status,
+                "cpus": cpus,
+                "memory_raw": mem_raw,
+                "memory_gb": round(mem_gb, 3) if mem_gb is not None else None,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "walltime_elapsed_s": round(elapsed_s, 1) if elapsed_s is not None else None,
+            }
+            job_records.append(rec)
+
+        # ── global aggregates ─────────────────────────────────────────────
+        total_cpus = sum(s["cpus_used"] for s in server_map.values())
+        total_mem = sum(s["memory_used_gb"] for s in server_map.values())
+        total_R = sum(s["jobs_R"] for s in server_map.values())
+        total_Q = sum(s["jobs_Q"] for s in server_map.values())
+        total_E = sum(s["jobs_E"] for s in server_map.values())
+
+        snapshot = {
+            "total_jobs_R": total_R,
+            "total_jobs_Q": total_Q,
+            "total_jobs_E": total_E,
+            "total_cpus_used": total_cpus,
+            "total_memory_used_gb": round(total_mem, 3),
+            "servers": [
+                {**s, "memory_used_gb": round(s["memory_used_gb"], 3)}
+                for s in server_map.values()
+            ],
+        }
+
+        # ── finish events (R→F transitions since last poll) ───────────────
+        events = []
+        for finished_job in self._job_db.get_finished():
+            fid = finished_job.get("JobID", "")
+            if not fid or fid in self._load_logger_finished_logged:
+                continue
+            # Only emit if job had at least one live (R/Q/E) period recorded
+            first_seen = finished_job.get("first_seen")
+            finished_at_str = finished_job.get("finished_at")
+            duration_s: Optional[float] = None
+            if first_seen and finished_at_str:
+                try:
+                    duration_s = (
+                        datetime.fromisoformat(finished_at_str)
+                        - datetime.fromisoformat(first_seen)
+                    ).total_seconds()
+                except Exception:
+                    pass
+
+            mem_raw_f = finished_job.get("Memory", "N/A")
+            mem_gb_f = self._parse_memory_gb(mem_raw_f)
+            cpus_raw_f = finished_job.get("CPUs", "N/A")
+            try:
+                cpus_f = int(cpus_raw_f) if cpus_raw_f not in (None, "N/A") else None
+            except (ValueError, TypeError):
+                cpus_f = None
+
+            events.append({
+                "type": "job_finished",
+                "job_id": fid,
+                "job_name": finished_job.get("Job_Name", "N/A"),
+                "owner": finished_job.get("Owner", "N/A"),
+                "server": finished_job.get("Server", "N/A"),
+                "cpus": cpus_f,
+                "memory_raw": mem_raw_f,
+                "memory_gb": round(mem_gb_f, 3) if mem_gb_f is not None else None,
+                "first_seen": first_seen,
+                "finished_at": finished_at_str,
+                "sim_duration_s": round(duration_s, 1) if duration_s is not None else None,
+            })
+            self._load_logger_finished_logged.add(fid)
+
+        return {
+            "timestamp": ts,
+            "snapshot": snapshot,
+            "jobs": job_records,
+            "events": events,
+        }
+
+    def _write_load_snapshot(self) -> None:
+        """Collect one snapshot and append it as a single line to today's NDJSON file."""
+        try:
+            record = self._collect_load_snapshot()
+        except Exception as exc:
+            print(f"[load-logger] Failed to collect snapshot: {exc}")
+            return
+
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        filename = f"server_load_{date_str}.jsonl"
+        filepath = os.path.join(self._load_logger_dir, filename)
+
+        try:
+            os.makedirs(self._load_logger_dir, exist_ok=True)
+            with open(filepath, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str) + "\n")
+        except Exception as exc:
+            print(f"[load-logger] Failed to write snapshot to {filepath}: {exc}")
+            return
+
+        n_jobs = len(record["jobs"])
+        n_events = len(record["events"])
+        print(
+            f"[load-logger] Snapshot written → {filename} "
+            f"({n_jobs} jobs, {n_events} finish events)"
+        )
+
+    def _load_logger_loop(self) -> None:
+        """Daemon thread body: write a load snapshot every `_load_logger_interval` seconds."""
+        while True:
+            try:
+                self._write_load_snapshot()
+            except Exception as exc:
+                print(f"[load-logger] Unexpected error: {exc}")
+            time.sleep(self._load_logger_interval)
+
+    def _start_load_logger(self) -> None:
+        """Start the daemon thread that periodically logs server load snapshots."""
+        t = threading.Thread(
+            target=self._load_logger_loop,
+            name="load-logger",
+            daemon=True,
+        )
+        t.start()
+        print(
+            f"[load-logger] Started → {self._load_logger_dir} "
+            f"(every {self._load_logger_interval // 60} min)"
+        )
 
     @staticmethod
     def _html_esc(text: str) -> str:
