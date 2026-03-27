@@ -54,9 +54,11 @@
 
 .s-value {
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-primary);
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 .s-value.success { color: var(--success); }
 .s-value.danger  { color: var(--error); }

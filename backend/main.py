@@ -18,7 +18,7 @@ import os
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure correct MIME types for the React SPA assets.
 # On Windows the registry can return wrong or missing values for these.
@@ -192,6 +192,63 @@ def _read_messag_content(monitor: JobMonitor, job: OrderedDict) -> Optional[str]
 
 
 # ---------------------------------------------------------------------------
+# Parse-result cache — mtime-keyed to avoid re-parsing unchanged messag files
+# ---------------------------------------------------------------------------
+
+# key  : absolute path to messag_react (one entry per monitored file)
+# value: (mtime_float, (summary_dict, plots_json_dict))
+# Capped at _PLOT_CACHE_MAX entries; oldest entry evicted on overflow.
+_PLOT_CACHE_MAX = 10
+_plot_cache: Dict[str, Tuple[float, Any]] = {}
+_plot_cache_order: List[str] = []  # insertion-order tracker for FIFO eviction
+
+
+def _best_messag_react_path(monitor: JobMonitor, job: OrderedDict) -> Optional[str]:
+    """
+    Return the absolute path to messag_react for a job, or None if it does not
+    exist yet.  Never falls back to the live messag file — callers that need
+    that fallback (e.g. interim-plots) handle it themselves.
+    """
+    react_path = monitor.get_messag_react_path(job)
+    if react_path and os.path.isfile(react_path):
+        return react_path
+    return None
+
+
+def _parse_plots_cached(file_path: str) -> Tuple[dict, dict]:
+    """
+    Run parse_and_plot_json on file_path and cache the result keyed by mtime.
+
+    Cache hit  : returned immediately when mtime is unchanged (no file read).
+    Cache miss : file is read fresh, parsed, result stored under the new mtime.
+
+    Always operates on the path supplied by the caller — it is the caller's
+    responsibility to pass messag_react (not the live messag file).
+
+    Returns (summary_dict, plots_json_dict).  Raises on read / parse error.
+    """
+    mtime = os.path.getmtime(file_path)
+    cached = _plot_cache.get(file_path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+        content = fh.read()
+
+    result = parse_and_plot_json(content)
+
+    if file_path not in _plot_cache:
+        # Evict oldest entry if at capacity
+        if len(_plot_cache) >= _PLOT_CACHE_MAX:
+            oldest = _plot_cache_order.pop(0)
+            _plot_cache.pop(oldest, None)
+        _plot_cache_order.append(file_path)
+
+    _plot_cache[file_path] = (mtime, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
 
@@ -300,15 +357,15 @@ async def get_plots(
     monitor = get_monitor()
     job = _make_job_od(server, job_id, job_path)
 
-    content = _read_messag_content(monitor, job)
-    if content is None:
+    file_path = _best_messag_react_path(monitor, job)
+    if file_path is None:
         raise HTTPException(
             status_code=404,
-            detail="messag / messag_react not found. If the job just started, retry in a few seconds.",
+            detail="messag_react not found. If the job just started, retry in a few seconds.",
         )
 
     try:
-        summary, plots_json = parse_and_plot_json(content)
+        summary, plots_json = _parse_plots_cached(file_path)
         return {"summary": summary, "plots": plots_json}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Plot generation failed: {exc}")
@@ -340,9 +397,7 @@ async def get_interim_plots(folder_path: str = Query(...)):
             detail=f"messag file not found in: {folder_path}"
         )
     try:
-        with open(read_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        summary, plots_json = parse_and_plot_json(content)
+        summary, plots_json = _parse_plots_cached(read_path)
         return {"summary": summary, "plots": plots_json}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Plot generation failed: {exc}")

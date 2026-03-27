@@ -252,6 +252,10 @@ class ConvergenceParser:
             current_sim_time = float(last_step.get("targetTime")) if last_step else None
         except (TypeError, ValueError):
             current_sim_time = None
+        try:
+            current_step_size = float(last_step.get("stepSize")) if last_step else None
+        except (TypeError, ValueError):
+            current_step_size = None
         return {
             "hostname": self.data["hostname"],
             "start_date": self.data["simulationStart"]["date"],
@@ -262,6 +266,7 @@ class ConvergenceParser:
             "failed_steps": self.data["failedSteps"],
             "termination_status": self.data["terminationStatus"],
             "current_sim_time": current_sim_time,
+            "current_step_size": current_step_size,
         }
 
 

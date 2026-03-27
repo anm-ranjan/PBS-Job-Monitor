@@ -215,7 +215,9 @@ export function PlotPanel({ summary, plots }) {
         </div>
         <div className="summary-item">
           <span className="s-label">Started</span>
-          <span className="s-value">{summary.start_date || '—'} {summary.start_time || ''}</span>
+          <span className="s-value">
+            {summary.start_date || '—'}<br />{summary.start_time || ''}
+          </span>
         </div>
         <div className="summary-item">
           <span className="s-label">Timesteps</span>
@@ -237,6 +239,12 @@ export function PlotPanel({ summary, plots }) {
           <div className="summary-item">
             <span className="s-label">Sim Time</span>
             <span className="s-value">{Number(summary.current_sim_time).toExponential(3)}</span>
+          </div>
+        )}
+        {summary.current_step_size != null && (
+          <div className="summary-item">
+            <span className="s-label">Step Time</span>
+            <span className="s-value">{Number(summary.current_step_size).toExponential(3)}</span>
           </div>
         )}
         <div className="summary-item">
