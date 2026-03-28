@@ -540,6 +540,40 @@
   position: relative;
   overflow: hidden;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ra-chart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: rgba(0,0,0,0.15);
+}
+
+.ra-trace-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ra-clear-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #f97316;
+  background: none;
+  border: 1px solid rgba(249,115,22,0.35);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ra-clear-btn:hover {
+  background: rgba(249,115,22,0.12);
 }
 
 .ra-placeholder {

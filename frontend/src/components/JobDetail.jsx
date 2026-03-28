@@ -7,7 +7,7 @@ import PartsList from './PartsList.jsx'
 import ResultAnalyser from './ResultAnalyser.jsx'
 import './JobDetail.css'
 
-const TABS_Q   = ['Convergence Plots', 'Live Log']
+const TABS_Q   = ['Convergence Plots', 'Live Log', 'Result Analyser']
 const TABS_R_E = ['Convergence Plots', 'Live Log', 'List Parts', 'Result Analyser', 'META Viewer']
 const TABS_F   = ['Convergence Plots', 'Optimal Timestep', 'Live Log', 'List Parts', 'Result Analyser', 'META Viewer']
 
