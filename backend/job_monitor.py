@@ -72,35 +72,47 @@ class JobDatabase:
             return
         now = datetime.now().isoformat()
         with self._lock:
-            if job_id not in self._data:
-                self._data[job_id] = {
-                    "JobID": job_id,
-                    "Server": job.get("Server", "N/A"),
-                    "Job_Name": job.get("Job_Name", "N/A"),
-                    "Job_Path": job.get("Job_Path", "N/A"),
-                    "Owner": job.get("Owner", "N/A"),
-                    "CPUs": job.get("CPUs", "N/A"),
-                    "Memory": job.get("Memory", "N/A"),
-                    "Status": job.get("Status", "N/A"),
-                    "first_seen": now,
-                    "last_seen": now,
-                    "finished_at": None,
-                    "meta_status": "idle",
-                    "meta_error": None,
-                    "meta_generate_on_finish": False,
-                }
-            else:
-                # Refresh fields that can change while running
-                for k in ("Status", "CPUs", "Memory", "Job_Name"):
-                    val = job.get(k)
-                    if val and val != "N/A":
-                        self._data[job_id][k] = val
-                self._data[job_id]["last_seen"] = now
-                # Ensure meta fields exist for jobs created before this feature
-                self._data[job_id].setdefault("meta_status", "idle")
-                self._data[job_id].setdefault("meta_error", None)
-                self._data[job_id].setdefault("meta_generate_on_finish", False)
+            self._upsert_unlocked(job_id, job, now)
             self._save()
+
+    def upsert_batch(self, jobs: List[dict]) -> None:
+        """Upsert multiple jobs in one lock acquisition with a single _save()."""
+        now = datetime.now().isoformat()
+        with self._lock:
+            for job in jobs:
+                job_id = job.get("JobID", "")
+                if job_id and job_id != "N/A":
+                    self._upsert_unlocked(job_id, job, now)
+            self._save()
+
+    def _upsert_unlocked(self, job_id: str, job: dict, now: str) -> None:
+        """Core upsert logic — caller must hold self._lock."""
+        if job_id not in self._data:
+            self._data[job_id] = {
+                "JobID": job_id,
+                "Server": job.get("Server", "N/A"),
+                "Job_Name": job.get("Job_Name", "N/A"),
+                "Job_Path": job.get("Job_Path", "N/A"),
+                "Owner": job.get("Owner", "N/A"),
+                "CPUs": job.get("CPUs", "N/A"),
+                "Memory": job.get("Memory", "N/A"),
+                "Status": job.get("Status", "N/A"),
+                "first_seen": now,
+                "last_seen": now,
+                "finished_at": None,
+                "meta_status": "idle",
+                "meta_error": None,
+                "meta_generate_on_finish": False,
+            }
+        else:
+            for k in ("Status", "CPUs", "Memory", "Job_Name"):
+                val = job.get(k)
+                if val and val != "N/A":
+                    self._data[job_id][k] = val
+            self._data[job_id]["last_seen"] = now
+            self._data[job_id].setdefault("meta_status", "idle")
+            self._data[job_id].setdefault("meta_error", None)
+            self._data[job_id].setdefault("meta_generate_on_finish", False)
 
     def get(self, job_id: str) -> Optional[dict]:
         """Return a single job entry or None."""
@@ -184,6 +196,10 @@ class JobMonitor:
         self.all_jobs = []
         self._messag_cache = {}
         self._messag_cache_time = {}
+        # Cache resolved messag source paths: Job_Path → windows messag path.
+        # Only positive hits are stored — None results are not cached so that
+        # jobs which start running after being queued pick up their path next cycle.
+        self._messag_path_cache: Dict[str, str] = {}
 
         # Shared job list cache (serves all FastAPI clients)
         self._jobs_cache: List[OrderedDict] = []
@@ -374,12 +390,12 @@ class JobMonitor:
                 jobs = self.parse_output(output, server["name"])
                 self.all_jobs.extend(jobs)
 
-        # Upsert every live job into the persistent database
+        # Upsert every live job into the persistent database in one batch (single save)
         live_ids = {j["JobID"] for j in self.all_jobs}
-        for job in self.all_jobs:
-            self._job_db.upsert(dict(job))
-            # Transfer submit-time pending META flag to DB (keep until F transition)
-            if self._meta_exe:
+        self._job_db.upsert_batch([dict(j) for j in self.all_jobs])
+        # Transfer submit-time pending META flags to DB (keep until F transition)
+        if self._meta_exe:
+            for job in self.all_jobs:
                 win_path = self.get_windows_path(job)
                 if win_path and win_path in self._pending_meta_on_finish:
                     self._job_db.set_meta_generate_on_finish(job["JobID"], True)
@@ -534,21 +550,32 @@ class JobMonitor:
         Do NOT open this file directly for analysis — use get_messag_react_path()
         instead so that Python never holds the LS-DYNA output file open.
 
+        Positive results are cached by Job_Path to avoid repeated network
+        filesystem stat/iterdir calls on mapped drives.
+
         Args:
             job: Job OrderedDict from fetch_jobs()
 
         Returns:
             Windows path to messag file or None
         """
+        job_path_key = job.get("Job_Path", "")
+        if job_path_key and job_path_key in self._messag_path_cache:
+            return self._messag_path_cache[job_path_key]
+
         windows_path = self.get_windows_path(job)
+        result = None
         if windows_path:
             if os.path.exists(os.path.join(windows_path, "Simulation")):
-                return os.path.join(windows_path, "Simulation", "messag")
+                result = os.path.join(windows_path, "Simulation", "messag")
             else:
                 dirSimRet = [f.name for f in Path(windows_path).iterdir() if f.is_dir() and f.name.startswith("Simulation_Ret")]
                 if len(dirSimRet) == 1:
-                    return os.path.join(windows_path, dirSimRet[0], "messag")
-        return None
+                    result = os.path.join(windows_path, dirSimRet[0], "messag")
+
+        if result and job_path_key:
+            self._messag_path_cache[job_path_key] = result
+        return result
 
     def get_messag_react_path(self, job: OrderedDict) -> Optional[str]:
         """
@@ -579,7 +606,11 @@ class JobMonitor:
 
     def _copy_all_messag_files(self) -> None:
         """
-        Copy messag → messag_react for every job currently in the cache.
+        Copy messag → messag_react for every running job currently in the cache.
+
+        Q and E jobs are skipped: Q jobs have no messag file yet, and E jobs are
+        exiting (PBS will remove them shortly — no point copying at this stage).
+        Skipping them avoids O(N) network stat calls for large queues.
 
         shutil.copy2 opens the source file only briefly (binary stream copy)
         and closes it immediately, so the live LS-DYNA output file is locked
@@ -588,6 +619,8 @@ class JobMonitor:
         # Snapshot the list to avoid races with cache updates
         jobs = list(self._jobs_cache)
         for job in jobs:
+            if job.get("Status") not in ("R",):
+                continue
             src = self.get_messag_path(job)
             dst = self.get_messag_react_path(job)
             if src and dst:
