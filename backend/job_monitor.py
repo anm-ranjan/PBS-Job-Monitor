@@ -884,7 +884,8 @@ class JobMonitor:
         live_ids = {j.get("JobID") for j in live_jobs}
         all_jobs = live_jobs + [j for j in finished_jobs if j.get("JobID") not in live_ids]
 
-        STATUS_ORDER = {"R": 0, "E": 1, "Q": 2, "F": 3}
+        STATUS_ORDER = {"R": 0, "E": 1, "F": 2}
+        all_jobs = [j for j in all_jobs if j.get("Status") in STATUS_ORDER]
         all_jobs.sort(key=lambda j: STATUS_ORDER.get(j.get("Status", "F"), 9))
 
         rows_html = []
@@ -953,12 +954,11 @@ class JobMonitor:
         </tr>""")
 
         rows = "\n".join(rows_html) if rows_html else (
-            '<tr><td colspan="8" class="empty">No jobs found.</td></tr>'
+            '<tr><td colspan="8" class="empty">No running or finished jobs.</td></tr>'
         )
 
         job_count = len(all_jobs)
         r_count   = sum(1 for j in all_jobs if j.get("Status") == "R")
-        q_count   = sum(1 for j in all_jobs if j.get("Status") == "Q")
         f_count   = sum(1 for j in all_jobs if j.get("Status") == "F")
 
         return f"""<!DOCTYPE html>
@@ -1073,7 +1073,6 @@ class JobMonitor:
 <div class="summary-bar">
   <div class="stat-pill">Total <span>{job_count}</span></div>
   <div class="stat-pill">Running <span>{r_count}</span></div>
-  <div class="stat-pill">Queued <span>{q_count}</span></div>
   <div class="stat-pill">Finished <span>{f_count}</span></div>
 </div>
 <table>
