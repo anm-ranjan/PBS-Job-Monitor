@@ -6,174 +6,38 @@ Provides functionality to:
 - Convert between Windows and Linux paths using drive mappings
 - Fetch messag files for convergence analysis
 - Stream live log output
-- Shared job cache for FastAPI (replaces per-session Streamlit state)
+- Shared job cache for FastAPI (serves all browser tabs)
+
+Optional features live in their own modules:
+- job_database.py  — persistent job store (JobDatabase)
+- meta_manager.py  — META CAE Systems viewer integration
+- status_page.py   — lightweight HTML status page writer
+- load_logger.py   — periodic NDJSON server load snapshots
 """
 
 import glob as _glob
-import paramiko
-import subprocess
-import yaml
-import os
-import sys
-import time
-import random
-import asyncio
 import json
+import logging
+import os
+import platform
 import shutil
+import subprocess
 import threading
-from pathlib import Path
-from typing import Optional, Dict, List, Any, Set, Tuple
-from datetime import datetime
+import time
 from collections import OrderedDict
 from getpass import getuser
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
 
+import paramiko
+import yaml
 
-class JobDatabase:
-    """
-    Persistent job store backed by a JSON file on disk.
+from job_database import JobDatabase
+from load_logger import LoadLogger
+from meta_manager import MetaManager
+from status_page import StatusPageWriter
 
-    Records every PBS job the monitor has ever seen, from first appearance
-    through completion. Survives backend restarts. Thread-safe.
-
-    Status values:
-        R  — running (live)
-        Q  — queued (live)
-        E  — exiting (live)
-        F  — finished (no longer in live server list)
-    """
-
-    def __init__(self, db_path: str):
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._data: Dict[str, dict] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if os.path.exists(self._path):
-            try:
-                with open(self._path, "r") as f:
-                    self._data = json.load(f)
-            except Exception as exc:
-                print(f"[job-db] Failed to load {self._path}: {exc}")
-                self._data = {}
-
-    def _save(self) -> None:
-        try:
-            with open(self._path, "w") as f:
-                json.dump(self._data, f, indent=2)
-        except Exception as exc:
-            print(f"[job-db] Failed to save {self._path}: {exc}")
-
-    def upsert(self, job: dict) -> None:
-        """Add new job or refresh dynamic fields (Status/CPUs/Memory/Job_Name).
-        Preserves existing meta_* fields on update."""
-        job_id = job.get("JobID", "")
-        if not job_id or job_id == "N/A":
-            return
-        now = datetime.now().isoformat()
-        with self._lock:
-            self._upsert_unlocked(job_id, job, now)
-            self._save()
-
-    def upsert_batch(self, jobs: List[dict]) -> None:
-        """Upsert multiple jobs in one lock acquisition with a single _save()."""
-        now = datetime.now().isoformat()
-        with self._lock:
-            for job in jobs:
-                job_id = job.get("JobID", "")
-                if job_id and job_id != "N/A":
-                    self._upsert_unlocked(job_id, job, now)
-            self._save()
-
-    def _upsert_unlocked(self, job_id: str, job: dict, now: str) -> None:
-        """Core upsert logic — caller must hold self._lock."""
-        if job_id not in self._data:
-            self._data[job_id] = {
-                "JobID": job_id,
-                "Server": job.get("Server", "N/A"),
-                "Job_Name": job.get("Job_Name", "N/A"),
-                "Job_Path": job.get("Job_Path", "N/A"),
-                "Owner": job.get("Owner", "N/A"),
-                "CPUs": job.get("CPUs", "N/A"),
-                "Memory": job.get("Memory", "N/A"),
-                "Status": job.get("Status", "N/A"),
-                "first_seen": now,
-                "last_seen": now,
-                "finished_at": None,
-                "meta_status": "idle",
-                "meta_error": None,
-                "meta_generate_on_finish": False,
-            }
-        else:
-            for k in ("Status", "CPUs", "Memory", "Job_Name"):
-                val = job.get(k)
-                if val and val != "N/A":
-                    self._data[job_id][k] = val
-            self._data[job_id]["last_seen"] = now
-            self._data[job_id].setdefault("meta_status", "idle")
-            self._data[job_id].setdefault("meta_error", None)
-            self._data[job_id].setdefault("meta_generate_on_finish", False)
-
-    def get(self, job_id: str) -> Optional[dict]:
-        """Return a single job entry or None."""
-        with self._lock:
-            return self._data.get(job_id)
-
-    def set_meta_status(self, job_id: str, status: str, error: Optional[str] = None) -> None:
-        """Update meta_status (and optionally meta_error) for a job."""
-        with self._lock:
-            if job_id in self._data:
-                self._data[job_id]["meta_status"] = status
-                self._data[job_id]["meta_error"] = error
-                self._save()
-
-    def set_meta_generate_on_finish(self, job_id: str, val: bool) -> None:
-        """Set the meta_generate_on_finish flag for a job."""
-        with self._lock:
-            if job_id in self._data:
-                self._data[job_id]["meta_generate_on_finish"] = val
-                self._save()
-
-    def mark_finished(self, job_id: str) -> None:
-        """Set Status = 'F' and record finished_at timestamp."""
-        with self._lock:
-            if job_id in self._data:
-                self._data[job_id]["Status"] = "F"
-                self._data[job_id]["finished_at"] = datetime.now().isoformat()
-                self._save()
-
-    def get_all(self) -> List[dict]:
-        with self._lock:
-            return list(self._data.values())
-
-    def get_finished(self) -> List[dict]:
-        with self._lock:
-            return [j for j in self._data.values() if j["Status"] == "F"]
-
-    def get_active(self) -> List[dict]:
-        """Return jobs with status R, Q, or E (not yet finished)."""
-        with self._lock:
-            return [j for j in self._data.values() if j["Status"] in ("R", "Q", "E")]
-
-    def delete(self, job_id: str) -> bool:
-        """Remove a finished job. Returns True if deleted, False if not found / not finished."""
-        with self._lock:
-            entry = self._data.get(job_id)
-            if entry and entry["Status"] == "F":
-                del self._data[job_id]
-                self._save()
-                return True
-            return False
-
-    def delete_all_finished(self) -> int:
-        """Remove all finished jobs. Returns count of deleted entries."""
-        with self._lock:
-            ids = [jid for jid, j in self._data.items() if j["Status"] == "F"]
-            for jid in ids:
-                del self._data[jid]
-            if ids:
-                self._save()
-            return len(ids)
+logger = logging.getLogger("pbs_monitor.monitor")
 
 
 class JobMonitor:
@@ -193,23 +57,28 @@ class JobMonitor:
         """
         self.config = self._load_config(config_path)
         self.user = getuser()
-        self.all_jobs = []
-        self._messag_cache = {}
-        self._messag_cache_time = {}
+        self.all_jobs: List[OrderedDict] = []
+        self._messag_cache: Dict[str, str] = {}
+        self._messag_cache_time: Dict[str, float] = {}
         # Cache resolved messag source paths: Job_Path → windows messag path.
         # Only positive hits are stored — None results are not cached so that
-        # jobs which start running after being queued pick up their path next cycle.
+        # jobs which start running after being queued pick up their path next
+        # cycle. Entries pointing into Simulation_Ret*/ are re-validated on
+        # read (see get_messag_path) so a new run's Simulation/ takes over.
         self._messag_path_cache: Dict[str, str] = {}
 
         # Shared job list cache (serves all FastAPI clients)
         self._jobs_cache: List[OrderedDict] = []
         self._jobs_cache_time: float = 0.0
+        # Serialises concurrent fetches from the API threadpool and the
+        # background daemons (status page writer, load logger).
+        self._fetch_lock = threading.Lock()
 
         self._setup_from_config()
 
         # Persistent job database (survives backend restarts)
         db_path = Path(config_path).parent / "job_database.json"
-        self._job_db = JobDatabase(str(db_path))
+        self.job_db = JobDatabase(str(db_path))
 
         # Background thread: copies messag → messag_react so Python never
         # holds the live LS-DYNA output file open for extended periods.
@@ -217,16 +86,30 @@ class JobMonitor:
         self._start_background_copier()
 
         # META CAE Systems viewer integration (optional — disabled if not configured)
-        if self._meta_exe:
-            self._start_meta_watcher()
+        meta_cfg = self.config.get("meta", {})
+        self.meta: Optional[MetaManager] = (
+            MetaManager(self, self.job_db, meta_cfg) if meta_cfg.get("executable") else None
+        )
 
         # Lightweight HTML status page writer (optional — disabled if not configured)
-        if self._status_page_path:
-            self._start_status_page_writer()
+        sp_cfg = self.config.get("status_page", {})
+        self.status_page: Optional[StatusPageWriter] = (
+            StatusPageWriter(self, self.job_db, sp_cfg["output_path"])
+            if sp_cfg.get("output_path") else None
+        )
 
         # Server load logger (optional — disabled if not configured)
-        if self._load_logger_dir:
-            self._start_load_logger()
+        ll_cfg = self.config.get("load_logger", {})
+        self.load_logger: Optional[LoadLogger] = (
+            LoadLogger(
+                self,
+                self.job_db,
+                ll_cfg["output_dir"],
+                ll_cfg.get("secondary_dir") or None,
+                int(ll_cfg.get("interval_minutes", 10)) * 60,
+            )
+            if ll_cfg.get("output_dir") else None
+        )
 
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file"""
@@ -257,37 +140,6 @@ class JobMonitor:
 
         self.script_dir = f"{self.linux_base_path}/{self.user}"
         self.script_path = f"{self.script_dir}/{self.remote_script_name}"
-
-        # META CAE Systems integration (optional)
-        meta_cfg = self.config.get("meta", {})
-        self._meta_exe: Optional[str] = meta_cfg.get("executable") or None
-        self._d3plot_poll_interval: int = int(meta_cfg.get("d3plot_poll_interval_minutes", 10)) * 60
-        self._metadb_poll_interval: int = int(meta_cfg.get("metadb_poll_interval_seconds", 30))
-        self._metadb_poll_timeout: int = int(meta_cfg.get("metadb_poll_timeout_minutes", 60)) * 60
-
-        # In-memory META state (reset on restart, not persisted)
-        self._auto_watch: Set[str] = set()
-        self._meta_batch_running: Set[str] = set()
-        self._meta_batch_start: Dict[str, float] = {}
-        self._d3plot_counts: Dict[str, int] = {}
-        self._d3plot_last_checked: Dict[str, float] = {}
-        self._meta_lock = threading.Lock()
-
-        # Submit-time pending flags (windows_job_path → True), cleared on F transition
-        self._pending_meta_on_finish: Dict[str, bool] = {}
-
-        # Lightweight HTML status page (optional)
-        sp_cfg = self.config.get("status_page", {})
-        self._status_page_path: Optional[str] = sp_cfg.get("output_path") or None
-
-        # Server load logger (optional)
-        ll_cfg = self.config.get("load_logger", {})
-        self._load_logger_dir: Optional[str] = ll_cfg.get("output_dir") or None
-        self._load_logger_secondary_dir: Optional[str] = ll_cfg.get("secondary_dir") or None
-        self._load_logger_interval: int = int(ll_cfg.get("interval_minutes", 10)) * 60
-        # In-memory set of finished job IDs whose finish-event has already been logged.
-        # Reset on restart (acceptable: a duplicate event will be written, not a missing one).
-        self._load_logger_finished_logged: Set[str] = set()
 
     def _setup_servers(self, servers_config: List[dict]) -> List[dict]:
         """Add username and key_file to server configurations"""
@@ -342,93 +194,107 @@ class JobMonitor:
             ssh.close()
 
             if error and not output:
-                print(f"Error from {server['hostname']}: {error}")
+                logger.warning("Error from %s: %s", server["hostname"], error)
                 return None
 
             return output
 
         except Exception as e:
-            print(f"Connection error to {server['hostname']}: {str(e)}")
+            logger.warning("Connection error to %s: %s", server["hostname"], e)
             return None
 
-    def parse_output(self, output: str, server_name: str) -> List[OrderedDict]:
-        """Parse the JSON output from the Python script"""
+    def parse_output(self, output: str, server_name: str) -> Optional[List[OrderedDict]]:
+        """
+        Parse the JSON output from the remote script.
+
+        Returns None (not an empty list) on a JSON decode error so callers can
+        distinguish "server responded with no jobs" from "response was corrupt".
+        """
         try:
             jobs_data = json.loads(output)
-            jobs = []
-
-            for job_data in jobs_data:
-                job = OrderedDict(
-                    [
-                        ("Server", server_name),
-                        ("JobID", job_data.get("JobID", "N/A")),
-                        ("Job_Name", job_data.get("Job_Name", "N/A")),
-                        ("Job_Path", job_data.get("Job_Path", "N/A")),
-                        ("CPUs", str(job_data.get("CPUs", "N/A"))),
-                        ("Status", job_data.get("Status", "N/A")),
-                        ("Owner", job_data.get("Owner", "N/A")),
-                        ("Memory", job_data.get("Memory", "N/A")),
-                    ]
-                )
-                jobs.append(job)
-
-            return jobs
-
         except json.JSONDecodeError as e:
-            print(f"Error parsing JSON from {server_name}: {str(e)}")
-            return []
+            logger.warning("Error parsing JSON from %s: %s", server_name, e)
+            return None
+
+        jobs = []
+        for job_data in jobs_data:
+            job = OrderedDict(
+                [
+                    ("Server", server_name),
+                    ("JobID", job_data.get("JobID", "N/A")),
+                    ("Job_Name", job_data.get("Job_Name", "N/A")),
+                    ("Job_Path", job_data.get("Job_Path", "N/A")),
+                    ("CPUs", str(job_data.get("CPUs", "N/A"))),
+                    ("Status", job_data.get("Status", "N/A")),
+                    ("Owner", job_data.get("Owner", "N/A")),
+                    ("Memory", job_data.get("Memory", "N/A")),
+                ]
+            )
+            jobs.append(job)
+
+        return jobs
 
     def fetch_jobs(self) -> List[OrderedDict]:
         """Fetch jobs from all servers (bypasses cache) and sync with job database."""
-        self.all_jobs = []
+        with self._fetch_lock:
+            return self._fetch_jobs_locked()
+
+    def _fetch_jobs_locked(self) -> List[OrderedDict]:
+        """
+        Core fetch logic — caller must hold self._fetch_lock.
+
+        The job list is built in a local variable and assigned to
+        self.all_jobs once at the end. (Concurrent fetches used to rebind
+        self.all_jobs mid-build, making two threads append into the same
+        list and producing duplicate job rows in the frontend.)
+        """
+        all_jobs: List[OrderedDict] = []
+        responded: Set[str] = set()
 
         for server in self.servers:
             command = f"python3 {self.script_path} --json"
             output = self.connect_and_execute(server, command)
-
-            if output:
-                jobs = self.parse_output(output, server["name"])
-                self.all_jobs.extend(jobs)
+            if output is None:
+                continue
+            jobs = self.parse_output(output, server["name"])
+            if jobs is None:
+                continue
+            responded.add(server["name"])
+            all_jobs.extend(jobs)
 
         # Upsert every live job into the persistent database in one batch (single save)
-        live_ids = {j["JobID"] for j in self.all_jobs}
-        self._job_db.upsert_batch([dict(j) for j in self.all_jobs])
-        # Transfer submit-time pending META flags to DB (keep until F transition)
-        if self._meta_exe:
-            for job in self.all_jobs:
-                win_path = self.get_windows_path(job)
-                if win_path and win_path in self._pending_meta_on_finish:
-                    self._job_db.set_meta_generate_on_finish(job["JobID"], True)
+        live_ids = {j["JobID"] for j in all_jobs}
+        self.job_db.upsert_batch([dict(j) for j in all_jobs])
+        # Transfer submit-time pending META flags to DB (kept until F transition)
+        if self.meta:
+            self.meta.sync_live_jobs(all_jobs)
 
-        # Any DB-active job that vanished from live list has finished:
-        # do a final messag copy, then mark it F in the DB.
-        for db_job in self._job_db.get_active():
-            if db_job["JobID"] not in live_ids:
-                self._do_final_messag_copy(db_job)
-                self._job_db.mark_finished(db_job["JobID"])
-                print(f"[job-db] Marked finished: {db_job['JobID']} ({db_job.get('Job_Name', '')})")
+        # Any DB-active job that vanished from the live list has finished:
+        # do a final messag copy, then mark it F in the DB. Only do this for
+        # jobs whose server actually responded this cycle — a transient SSH
+        # failure must not mark a whole server's jobs as finished.
+        for db_job in self.job_db.get_active():
+            if db_job["JobID"] in live_ids:
+                continue
+            if db_job.get("Server") not in responded:
+                continue
+            self._do_final_messag_copy(db_job)
+            self.job_db.mark_finished(db_job["JobID"])
+            logger.info("Marked finished: %s (%s)", db_job["JobID"], db_job.get("Job_Name", ""))
 
-                # META on-finish hook
-                if self._meta_exe:
-                    job_path = db_job.get("Job_Path", "")
-                    win_path = self.get_windows_path(OrderedDict(db_job.items()))
-                    pending = bool(win_path and self._pending_meta_on_finish.pop(win_path, False))
-                    db_entry = self._job_db.get(db_job["JobID"])
-                    if (pending or (db_entry and db_entry.get("meta_generate_on_finish"))) \
-                            and db_entry.get("meta_status", "idle") not in ("generating", "ready"):
-                        sim_dir = self.get_sim_dir(OrderedDict(db_job.items()))
-                        if sim_dir:
-                            self.launch_meta_batch(db_job["JobID"], sim_dir)
+            if self.meta:
+                self.meta.on_job_finished(db_job)
 
-        return self.all_jobs
+        self.all_jobs = all_jobs
+        return all_jobs
 
     def _do_final_messag_copy(self, job_dict: dict) -> None:
         """
         Copy messag → messag_react one final time when a job is detected as finished.
 
-        Called from fetch_jobs() the moment a previously-active job disappears
-        from the live server list, ensuring the last simulation output is captured
-        before the entry is archived in the database.
+        Called the moment a previously-active job disappears from the live
+        server list, ensuring the last simulation output is captured before
+        the entry is archived in the database.
         """
         job_od = OrderedDict(job_dict.items())
         src = self.get_messag_path(job_od)
@@ -437,11 +303,15 @@ class JobMonitor:
             try:
                 if os.path.isfile(src):
                     shutil.copy2(src, dst)
-                    print(f"[messag-copier] Final copy done for job {job_dict.get('JobID')}")
+                    logger.info("Final messag copy done for job %s", job_dict.get("JobID"))
             except Exception as exc:
-                print(f"[messag-copier] Final copy failed for job {job_dict.get('JobID')}: {exc}")
+                logger.warning("Final messag copy failed for job %s: %s",
+                               job_dict.get("JobID"), exc)
 
-    def get_jobs_cached(self, ttl: Optional[int] = None) -> List[OrderedDict]:
+    def _jobs_cache_fresh(self, ttl: int) -> bool:
+        return bool(self._jobs_cache) and (time.time() - self._jobs_cache_time) < ttl
+
+    def get_jobs_cached(self, ttl: Optional[int] = None, force: bool = False) -> List[OrderedDict]:
         """
         Fetch jobs with a shared TTL cache (used by FastAPI to serve all clients).
 
@@ -449,6 +319,7 @@ class JobMonitor:
 
         Args:
             ttl: Cache time-to-live in seconds. Defaults to config cache_timeout.
+            force: Bypass the TTL check and fetch fresh data now.
 
         Returns:
             List of job OrderedDicts
@@ -456,14 +327,17 @@ class JobMonitor:
         if ttl is None:
             ttl = self.cache_timeout
 
-        now = time.time()
-        if self._jobs_cache and (now - self._jobs_cache_time) < ttl:
+        if not force and self._jobs_cache_fresh(ttl):
             return self._jobs_cache
 
-        jobs = self.fetch_jobs()
-        self._jobs_cache = jobs
-        self._jobs_cache_time = now
-        return jobs
+        with self._fetch_lock:
+            # Double-check: another thread may have refreshed while we waited.
+            if not force and self._jobs_cache_fresh(ttl):
+                return self._jobs_cache
+            jobs = self._fetch_jobs_locked()
+            self._jobs_cache = jobs
+            self._jobs_cache_time = time.time()
+            return jobs
 
     def windows_to_linux_path(
         self, windows_path: str
@@ -542,6 +416,39 @@ class JobMonitor:
         windows_path, _ = self.linux_to_windows_path(linux_path, hostname)
         return windows_path
 
+    # ------------------------------------------------------------------
+    # Simulation directory / messag path resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_sim_dir(windows_path: str) -> Optional[str]:
+        """
+        Return the Simulation/ directory under windows_path, falling back to a
+        single Simulation_Ret*/ directory (finished RetForce runs). None if
+        neither exists.
+        """
+        sim_dir = os.path.join(windows_path, "Simulation")
+        if os.path.exists(sim_dir):
+            return sim_dir
+        try:
+            dirs = [f.name for f in Path(windows_path).iterdir()
+                    if f.is_dir() and f.name.startswith("Simulation_Ret")]
+            if len(dirs) == 1:
+                return os.path.join(windows_path, dirs[0])
+        except Exception:
+            pass
+        return None
+
+    def get_sim_dir(self, job: OrderedDict) -> Optional[str]:
+        """
+        Return the Simulation/ (or Simulation_Ret*/) directory as a Windows path.
+        Returns None if not resolvable.
+        """
+        windows_path = self.get_windows_path(job)
+        if not windows_path:
+            return None
+        return self._resolve_sim_dir(windows_path)
+
     def get_messag_path(self, job: OrderedDict) -> Optional[str]:
         """
         Get full path to the live messag file for a job.
@@ -551,7 +458,11 @@ class JobMonitor:
         instead so that Python never holds the LS-DYNA output file open.
 
         Positive results are cached by Job_Path to avoid repeated network
-        filesystem stat/iterdir calls on mapped drives.
+        filesystem stat/iterdir calls on mapped drives. A cached path inside a
+        Simulation_Ret*/ directory is re-validated: the moment a new run
+        creates a fresh Simulation/ in the same job directory the stale entry
+        is dropped, otherwise the copier would keep feeding the old run's
+        messag into the new run's messag_react.
 
         Args:
             job: Job OrderedDict from fetch_jobs()
@@ -560,18 +471,26 @@ class JobMonitor:
             Windows path to messag file or None
         """
         job_path_key = job.get("Job_Path", "")
-        if job_path_key and job_path_key in self._messag_path_cache:
-            return self._messag_path_cache[job_path_key]
+        cached = self._messag_path_cache.get(job_path_key) if job_path_key else None
+        if cached:
+            sim_dir_name = os.path.basename(os.path.dirname(cached))
+            if sim_dir_name == "Simulation":
+                return cached
+            base_dir = os.path.dirname(os.path.dirname(cached))
+            if not os.path.exists(os.path.join(base_dir, "Simulation")):
+                return cached
+            # New Simulation/ appeared next to the cached Simulation_Ret*/ —
+            # invalidate and re-resolve below.
+            self._messag_path_cache.pop(job_path_key, None)
+            logger.info("messag path cache invalidated for %s (new Simulation/ found)",
+                        job_path_key)
 
         windows_path = self.get_windows_path(job)
         result = None
         if windows_path:
-            if os.path.exists(os.path.join(windows_path, "Simulation")):
-                result = os.path.join(windows_path, "Simulation", "messag")
-            else:
-                dirSimRet = [f.name for f in Path(windows_path).iterdir() if f.is_dir() and f.name.startswith("Simulation_Ret")]
-                if len(dirSimRet) == 1:
-                    result = os.path.join(windows_path, dirSimRet[0], "messag")
+            sim_dir = self._resolve_sim_dir(windows_path)
+            if sim_dir:
+                result = os.path.join(sim_dir, "messag")
 
         if result and job_path_key:
             self._messag_path_cache[job_path_key] = result
@@ -590,14 +509,9 @@ class JobMonitor:
         Returns:
             Windows path to messag_react file or None
         """
-        windows_path = self.get_windows_path(job)
-        if windows_path:
-            if os.path.exists(os.path.join(windows_path, "Simulation")):
-                return os.path.join(windows_path, "Simulation", "messag_react")
-            else:
-                dirSimRet = [f.name for f in Path(windows_path).iterdir() if f.is_dir() and f.name.startswith("Simulation_Ret")]
-                if len(dirSimRet) == 1:
-                    return os.path.join(windows_path, dirSimRet[0], "messag_react")
+        sim_dir = self.get_sim_dir(job)
+        if sim_dir:
+            return os.path.join(sim_dir, "messag_react")
         return None
 
     # ------------------------------------------------------------------
@@ -628,7 +542,7 @@ class JobMonitor:
                     if os.path.isfile(src):
                         shutil.copy2(src, dst)
                 except Exception as exc:
-                    print(f"[messag-copier] Failed to copy for job {job.get('JobID')}: {exc}")
+                    logger.warning("Failed to copy for job %s: %s", job.get("JobID"), exc)
 
     def _background_copy_loop(self) -> None:
         """Daemon thread body: copy messag files periodically."""
@@ -636,7 +550,7 @@ class JobMonitor:
             try:
                 self._copy_all_messag_files()
             except Exception as exc:
-                print(f"[messag-copier] Unexpected error: {exc}")
+                logger.error("messag copier unexpected error: %s", exc)
             time.sleep(self._copy_interval)
 
     def _start_background_copier(self) -> None:
@@ -649,777 +563,34 @@ class JobMonitor:
         t.start()
 
     # ------------------------------------------------------------------
-    # META CAE Systems integration
+    # META delegation (safe when META is not configured)
     # ------------------------------------------------------------------
-
-    def get_sim_dir(self, job: OrderedDict) -> Optional[str]:
-        """
-        Return the Simulation/ (or Simulation_Ret*/) directory as a Windows path.
-        Reuses the same fallback logic as get_messag_path.
-        Returns None if not resolvable.
-        """
-        windows_path = self.get_windows_path(job)
-        if not windows_path:
-            return None
-        sim_dir = os.path.join(windows_path, "Simulation")
-        if os.path.exists(sim_dir):
-            return sim_dir
-        try:
-            dirs = [f.name for f in Path(windows_path).iterdir()
-                    if f.is_dir() and f.name.startswith("Simulation_Ret")]
-            if len(dirs) == 1:
-                return os.path.join(windows_path, dirs[0])
-        except Exception:
-            pass
-        return None
 
     def get_d3plot_count(self, sim_dir: str) -> int:
         """Return the number of d3plot* files in sim_dir (local mapped drive, no SSH)."""
         return len(_glob.glob(os.path.join(sim_dir, "d3plot*")))
 
-    def launch_meta_batch(self, job_id: str, sim_dir: str) -> None:
-        """
-        Copy runtimePBSProDB.ses into sim_dir and launch META in batch mode to generate runtimePBSPro.metadb.
-        Marks meta_status='generating' in the job database.
-        """
-        src_ses = Path(__file__).parent / "runtimePBSProDB.ses"
-        dst_ses = Path(sim_dir) / "runtimePBSProDB.ses"
-        try:
-            shutil.copy2(str(src_ses), str(dst_ses))
-        except Exception as exc:
-            print(f"[meta] Failed to copy runtimePBSProDB.ses to {sim_dir}: {exc}")
-            self._job_db.set_meta_status(job_id, "error", f"Failed to copy runtimePBSProDB.ses: {exc}")
-            return
-
-        cmd = f'"{self._meta_exe}" -b -s "{dst_ses}" "{sim_dir}" -nolog -noses'
-        try:
-            subprocess.Popen(cmd, shell=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as exc:
-            print(f"[meta] Failed to launch META batch for job {job_id}: {exc}")
-            self._job_db.set_meta_status(job_id, "error", f"Failed to launch META: {exc}")
-            return
-
-        with self._meta_lock:
-            self._meta_batch_running.add(job_id)
-            self._meta_batch_start[job_id] = time.time()
-        self._job_db.set_meta_status(job_id, "generating")
-        print(f"[meta] Launched batch for job {job_id} in {sim_dir}")
-
-    def launch_meta_viewer(self, sim_dir: str) -> Tuple[bool, str]:
-        """
-        Launch META viewer for the runtimePBSPro.metadb in sim_dir.
-        Returns (True, cmd_string) so the frontend can show the copy-able command.
-        """
-        metadb = os.path.join(sim_dir, "runtimePBSPro.metadb")
-        cmd = f'"{self._meta_exe}" -p "{metadb}" -viewer -nolog -noses'
-        try:
-            subprocess.Popen(cmd, shell=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True, cmd
-        except Exception as exc:
-            return False, str(exc)
-
-    def _meta_watcher_loop(self) -> None:
-        """Daemon thread: poll for metadb completion and d3plot changes."""
-        while True:
-            try:
-                now = time.time()
-
-                # 1. Check metadb completion for batch-running jobs
-                with self._meta_lock:
-                    batch_jobs = set(self._meta_batch_running)
-
-                for job_id in batch_jobs:
-                    db_entry = self._job_db.get(job_id)
-                    if not db_entry:
-                        with self._meta_lock:
-                            self._meta_batch_running.discard(job_id)
-                            self._meta_batch_start.pop(job_id, None)
-                        continue
-
-                    # Reconstruct job OrderedDict to get sim_dir
-                    job_od = OrderedDict(db_entry.items())
-                    sim_dir = self.get_sim_dir(job_od)
-                    if sim_dir and os.path.isfile(os.path.join(sim_dir, "runtimePBSPro.metadb")):
-                        with self._meta_lock:
-                            self._meta_batch_running.discard(job_id)
-                            self._meta_batch_start.pop(job_id, None)
-                        self._job_db.set_meta_status(job_id, "ready")
-                        print(f"[meta] runtimePBSPro.metadb ready for job {job_id}")
-                    else:
-                        start = self._meta_batch_start.get(job_id, now)
-                        if now - start > self._metadb_poll_timeout:
-                            with self._meta_lock:
-                                self._meta_batch_running.discard(job_id)
-                                self._meta_batch_start.pop(job_id, None)
-                            self._job_db.set_meta_status(
-                                job_id, "error", "Timed out waiting for metadb"
-                            )
-                            print(f"[meta] Timeout waiting for metadb for job {job_id}")
-
-                # 2. D3plot count check for auto-watched jobs
-                with self._meta_lock:
-                    watched = set(self._auto_watch)
-
-                for job_id in watched:
-                    last = self._d3plot_last_checked.get(job_id, 0)
-                    if now - last < self._d3plot_poll_interval:
-                        continue
-                    db_entry = self._job_db.get(job_id)
-                    if not db_entry:
-                        continue
-                    job_od = OrderedDict(db_entry.items())
-                    sim_dir = self.get_sim_dir(job_od)
-                    if not sim_dir:
-                        self._d3plot_last_checked[job_id] = now
-                        continue
-                    count = self.get_d3plot_count(sim_dir)
-                    self._d3plot_last_checked[job_id] = now
-                    prev = self._d3plot_counts.get(job_id, 0)
-                    self._d3plot_counts[job_id] = count
-                    if count > prev:
-                        with self._meta_lock:
-                            already = job_id in self._meta_batch_running
-                        if not already:
-                            print(f"[meta] New d3plots for job {job_id} ({prev}→{count}), launching batch in 10s")
-                            time.sleep(10)
-                            self.launch_meta_batch(job_id, sim_dir)
-
-            except Exception as exc:
-                print(f"[meta-watcher] Unexpected error: {exc}")
-
-            time.sleep(self._metadb_poll_interval)
-
-    def _start_meta_watcher(self) -> None:
-        """Start the daemon thread that watches META batch jobs and d3plot counts."""
-        t = threading.Thread(
-            target=self._meta_watcher_loop,
-            name="meta-watcher",
-            daemon=True,
-        )
-        t.start()
-
-    # ------------------------------------------------------------------
-    # Lightweight HTML status page writer
-    # ------------------------------------------------------------------
-
-    def _in_status_page_window(self) -> bool:
-        """
-        Return True if the current local time falls inside an active writing window.
-
-        Active windows:
-          - 17:00 – 01:00 (evening / overnight)
-          - 06:00 – 09:00 (morning)
-        """
-        h = datetime.now().hour + datetime.now().minute / 60.0
-        return (h >= 17.0 or h < 1.0) or (6.0 <= h < 9.0)
-
-    def _start_status_page_writer(self) -> None:
-        """Start the daemon thread that writes the HTML status page on a random schedule."""
-        t = threading.Thread(
-            target=self._status_page_writer_loop,
-            name="status-page-writer",
-            daemon=True,
-        )
-        t.start()
-        print(f"[status-page] Writer started → {self._status_page_path}")
-
-    def _status_page_writer_loop(self) -> None:
-        """
-        Daemon thread body.
-
-        Writes the status page immediately upon entering an active window, then
-        sleeps a random 20–45 minutes before the next write.  When outside all
-        windows the thread polls every 60 seconds so it wakes promptly at window
-        open without burning CPU.
-        """
-        while True:
-            try:
-                if self._in_status_page_window():
-                    self._write_status_page()
-                    sleep_sec = random.uniform(20 * 60, 45 * 60)
-                    print(
-                        f"[status-page] Next write in {sleep_sec / 60:.1f} min"
-                    )
-                    time.sleep(sleep_sec)
-                else:
-                    time.sleep(60)
-            except Exception as exc:
-                print(f"[status-page] Unexpected error: {exc}")
-                time.sleep(60)
-
-    def _write_status_page(self) -> None:
-        """Render the HTML and write it to the configured output path."""
-        try:
-            html = self._generate_status_html()
-            path = self._status_page_path
-            # Write atomically via a temp file next to the target
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(html)
-            os.replace(tmp, path)
-            print(
-                f"[status-page] Written at {datetime.now().strftime('%H:%M:%S')} → {path}"
-            )
-        except Exception as exc:
-            print(f"[status-page] Failed to write: {exc}")
-
-    def _generate_status_html(self) -> str:
-        """
-        Build a fully self-contained HTML status page.
-
-        Reads messag_react (or messag) for R/E/F jobs to extract current sim
-        time and step count via ConvergenceParser — no SSH required.
-        """
-        from convergence_plotter import ConvergenceParser
-
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Merge live + finished jobs (live takes priority by JobID)
-        # Use get_jobs_cached() so stale cache is refreshed and finished jobs
-        # are properly detected and marked F in the DB before we render.
-        live_jobs = list(self.get_jobs_cached())
-        finished_jobs = self._job_db.get_finished()
-        live_ids = {j.get("JobID") for j in live_jobs}
-        all_jobs = live_jobs + [j for j in finished_jobs if j.get("JobID") not in live_ids]
-
-        STATUS_ORDER = {"R": 0, "E": 1, "F": 2}
-        all_jobs = [j for j in all_jobs if j.get("Status") in STATUS_ORDER]
-        all_jobs.sort(key=lambda j: STATUS_ORDER.get(j.get("Status", "F"), 9))
-
-        rows_html = []
-        for job in all_jobs:
-            job_id   = job.get("JobID", "N/A")
-            job_name = job.get("Job_Name", "N/A")
-            status   = job.get("Status", "N/A")
-            server   = job.get("Server", "N/A")
-            owner    = job.get("Owner", "N/A")
-            finished_at = job.get("finished_at", "")
-
-            sim_time_str   = "—"
-            step_size_str  = "—"
-            term_str       = "—"
-            notes_str      = ""
-
-            if status in ("R", "E", "F"):
-                job_od = OrderedDict(job.items())
-                content = None
-                react_path = self.get_messag_react_path(job_od)
-                if react_path and os.path.isfile(react_path):
-                    try:
-                        with open(react_path, "r", encoding="utf-8", errors="ignore") as f:
-                            content = f.read()
-                    except Exception:
-                        pass
-                if content is None:
-                    messag_path = self.get_messag_path(job_od)
-                    if messag_path and os.path.isfile(messag_path):
-                        try:
-                            with open(messag_path, "r", encoding="utf-8", errors="ignore") as f:
-                                content = f.read()
-                        except Exception:
-                            pass
-
-                if content:
-                    try:
-                        parser = ConvergenceParser(content)
-                        parser.parse()
-                        summary = parser.get_summary()
-                        sim_t = summary.get("current_sim_time")
-                        sim_time_str = f"{sim_t:.4f}" if sim_t is not None else "—"
-                        term_str     = summary.get("termination_status") or "—"
-                    except Exception:
-                        pass
-                    step_size_str = self._parse_step_size(content)
-
-            if status == "F" and finished_at:
-                try:
-                    fa = datetime.fromisoformat(finished_at)
-                    notes_str = f"Finished {fa.strftime('%Y-%m-%d %H:%M')}"
-                except Exception:
-                    notes_str = finished_at
-
-            badge_class = f"badge-{status}" if status in ("R", "Q", "E", "F") else "badge-unk"
-            rows_html.append(f"""
-        <tr>
-          <td class="job-name">{self._html_esc(job_name)}</td>
-          <td class="mono">{self._html_esc(job_id)}</td>
-          <td><span class="badge {badge_class}">{status}</span></td>
-          <td>{self._html_esc(server)}</td>
-          <td class="mono">{sim_time_str}</td>
-          <td class="mono">{step_size_str}</td>
-          <td>{self._html_esc(term_str)}</td>
-          <td class="notes">{self._html_esc(notes_str)}</td>
-        </tr>""")
-
-        rows = "\n".join(rows_html) if rows_html else (
-            '<tr><td colspan="8" class="empty">No running or finished jobs.</td></tr>'
-        )
-
-        job_count = len(all_jobs)
-        r_count   = sum(1 for j in all_jobs if j.get("Status") == "R")
-        f_count   = sum(1 for j in all_jobs if j.get("Status") == "F")
-
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="refresh" content="300">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PBS Job Status — {now_str}</title>
-<style>
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
-    background: #0d1117;
-    color: #c9d1d9;
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    font-size: 14px;
-    padding: 24px 32px 48px;
-    min-height: 100vh;
-  }}
-  header {{
-    border-bottom: 1px solid #21262d;
-    padding-bottom: 14px;
-    margin-bottom: 20px;
-    display: flex;
-    align-items: baseline;
-    gap: 20px;
-    flex-wrap: wrap;
-  }}
-  h1 {{
-    font-size: 1.35rem;
-    font-weight: 600;
-    color: #e6edf3;
-    letter-spacing: 0.02em;
-  }}
-  .gen-time {{
-    font-size: 0.8rem;
-    color: #8b949e;
-    font-family: 'Courier New', monospace;
-  }}
-  .summary-bar {{
-    display: flex;
-    gap: 18px;
-    margin-bottom: 18px;
-    flex-wrap: wrap;
-  }}
-  .stat-pill {{
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 0.78rem;
-    color: #8b949e;
-  }}
-  .stat-pill span {{ color: #e6edf3; font-weight: 600; }}
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-    background: #0d1117;
-  }}
-  thead tr {{
-    border-bottom: 1px solid #30363d;
-  }}
-  th {{
-    text-align: left;
-    padding: 8px 12px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #8b949e;
-    white-space: nowrap;
-  }}
-  td {{
-    padding: 9px 12px;
-    border-bottom: 1px solid #161b22;
-    vertical-align: middle;
-  }}
-  tr:last-child td {{ border-bottom: none; }}
-  tr:hover td {{ background: #161b22; }}
-  .job-name {{ color: #e6edf3; font-weight: 500; max-width: 260px; word-break: break-word; }}
-  .mono {{ font-family: 'Courier New', monospace; font-size: 0.85rem; color: #8b949e; }}
-  .notes {{ font-size: 0.8rem; color: #8b949e; }}
-  .empty {{ text-align: center; padding: 32px; color: #484f58; }}
-  .badge {{
-    display: inline-block;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    font-family: 'Courier New', monospace;
-  }}
-  .badge-R {{ background: #1a3a1a; color: #3fb950; border: 1px solid #238636; }}
-  .badge-Q {{ background: #2d2208; color: #d29922; border: 1px solid #9e6a03; }}
-  .badge-E {{ background: #3a1a1a; color: #f85149; border: 1px solid #da3633; }}
-  .badge-F {{ background: #1c1f24; color: #8b949e; border: 1px solid #30363d; }}
-  .badge-unk {{ background: #1c1f24; color: #8b949e; border: 1px solid #30363d; }}
-  footer {{
-    margin-top: 32px;
-    font-size: 0.72rem;
-    color: #484f58;
-    border-top: 1px solid #161b22;
-    padding-top: 12px;
-  }}
-</style>
-</head>
-<body>
-<header>
-  <h1>PBS Job Monitor</h1>
-  <span class="gen-time">Generated: {now_str} &nbsp;|&nbsp; Auto-refresh: 5 min</span>
-</header>
-<div class="summary-bar">
-  <div class="stat-pill">Total <span>{job_count}</span></div>
-  <div class="stat-pill">Running <span>{r_count}</span></div>
-  <div class="stat-pill">Finished <span>{f_count}</span></div>
-</div>
-<table>
-  <thead>
-    <tr>
-      <th>Job Name</th>
-      <th>Job ID</th>
-      <th>Status</th>
-      <th>Server</th>
-      <th>Sim Time</th>
-      <th>Step Size (dt)</th>
-      <th>Term. Status</th>
-      <th>Notes</th>
-    </tr>
-  </thead>
-  <tbody>
-{rows}
-  </tbody>
-</table>
-<footer>PBS Job Monitor v2.0 &nbsp;|&nbsp; Updates every 20–45 min during active hours (17:00–01:00, 06:00–09:00)</footer>
-</body>
-</html>"""
-
-    @staticmethod
-    def _parse_step_size(content: str) -> str:
-        """
-        Find the last 'BEGIN implicit' marker in the messag content, then
-        return the 'current step size' value from the line 3 positions below it.
-
-        Format in messag:
-            BEGIN implicit statics  step  N t= X.XXE+XX   <date>
-            ====================================================
-                            time =  X.XXE+XX
-              current step size =  X.XXE+XX          ← 3 lines below
-        """
-        lines = content.splitlines()
-        last_begin_idx = None
-        for i, line in enumerate(lines):
-            if "BEGIN implicit" in line:
-                last_begin_idx = i
-        if last_begin_idx is None:
-            return "—"
-        target_idx = last_begin_idx + 3
-        if target_idx >= len(lines):
-            return "—"
-        target_line = lines[target_idx]
-        if "current step size" in target_line and "=" in target_line:
-            return target_line.split("=", 1)[-1].strip()
-        return "—"
-
-    # ------------------------------------------------------------------
-    # Server load logger
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_memory_gb(mem_str: str) -> Optional[float]:
-        """
-        Convert a PBS memory string to gigabytes.
-
-        PBS reports memory as e.g. '192gb', '4096mb', '1024kb', '512000kb'.
-        Returns None if the string cannot be parsed.
-        """
-        if not mem_str or mem_str == "N/A":
-            return None
-        s = mem_str.strip().lower()
-        try:
-            if s.endswith("gb"):
-                return float(s[:-2])
-            if s.endswith("mb"):
-                return float(s[:-2]) / 1024.0
-            if s.endswith("kb"):
-                return float(s[:-2]) / (1024.0 ** 2)
-            if s.endswith("b"):
-                return float(s[:-1]) / (1024.0 ** 3)
-            # Bare number — assume bytes
-            return float(s) / (1024.0 ** 3)
-        except ValueError:
-            return None
-
-    def _collect_load_snapshot(self) -> dict:
-        """
-        Build one complete load snapshot dict from PBS data only.
-
-        Data source is exclusively the live PBS job list (via get_jobs_cached).
-        No messag/messag_react files are read, so all jobs from all users are
-        treated consistently regardless of drive mapping or file accessibility.
-
-        Called from the logger thread every `_load_logger_interval` seconds.
-        Returns a dict that will be serialised as a single NDJSON line.
-        """
-        now = datetime.now()
-        ts = now.isoformat()
-
-        # ── live jobs (PBS data only) ─────────────────────────────────────
-        live_jobs = list(self.get_jobs_cached())
-
-        # ── server-level aggregates ───────────────────────────────────────
-        server_map: Dict[str, dict] = {}
-        for srv in self.servers:
-            server_map[srv["name"]] = {
-                "name": srv["name"],
-                "hostname": srv["hostname"],
-                "jobs_R": 0, "jobs_Q": 0, "jobs_E": 0,
-                "cpus_used": 0,
-                "memory_used_gb": 0.0,
-            }
-
-        job_records = []
-        for job in live_jobs:
-            status = job.get("Status", "N/A")
-            srv_name = job.get("Server", "")
-            cpus_raw = job.get("CPUs", "N/A")
-            mem_raw = job.get("Memory", "N/A")
-            job_id = job.get("JobID", "N/A")
-
-            try:
-                cpus = int(cpus_raw) if cpus_raw not in (None, "N/A") else 0
-            except (ValueError, TypeError):
-                cpus = 0
-            mem_gb = self._parse_memory_gb(mem_raw)
-
-            # Per-server counters (R and E consume CPUs/memory; Q is just queued)
-            if srv_name in server_map:
-                agg = server_map[srv_name]
-                if status == "R":
-                    agg["jobs_R"] += 1
-                    agg["cpus_used"] += cpus
-                    if mem_gb is not None:
-                        agg["memory_used_gb"] += mem_gb
-                elif status == "Q":
-                    agg["jobs_Q"] += 1
-                elif status == "E":
-                    agg["jobs_E"] += 1
-                    agg["cpus_used"] += cpus
-                    if mem_gb is not None:
-                        agg["memory_used_gb"] += mem_gb
-
-            # Timing fields from job DB (monitor-side timestamps, not PBS)
-            db_entry = self._job_db.get(job_id) or {}
-            first_seen = db_entry.get("first_seen")
-            last_seen = db_entry.get("last_seen")
-
-            elapsed_s: Optional[float] = None
-            if first_seen:
-                try:
-                    elapsed_s = (now - datetime.fromisoformat(first_seen)).total_seconds()
-                except Exception:
-                    pass
-
-            # Determine server hostname for this job
-            srv_hostname: Optional[str] = None
-            for s in self.servers:
-                if s["name"] == srv_name:
-                    srv_hostname = s["hostname"]
-                    break
-
-            rec = {
-                "job_id": job_id,
-                "job_name": job.get("Job_Name", "N/A"),
-                "owner": job.get("Owner", "N/A"),
-                "server": srv_name,
-                "server_hostname": srv_hostname,
-                "status": status,
-                "cpus": cpus,
-                "memory_raw": mem_raw,
-                "memory_gb": round(mem_gb, 3) if mem_gb is not None else None,
-                "first_seen": first_seen,
-                "last_seen": last_seen,
-                "walltime_elapsed_s": round(elapsed_s, 1) if elapsed_s is not None else None,
-            }
-            job_records.append(rec)
-
-        # ── global aggregates ─────────────────────────────────────────────
-        total_cpus = sum(s["cpus_used"] for s in server_map.values())
-        total_mem = sum(s["memory_used_gb"] for s in server_map.values())
-        total_R = sum(s["jobs_R"] for s in server_map.values())
-        total_Q = sum(s["jobs_Q"] for s in server_map.values())
-        total_E = sum(s["jobs_E"] for s in server_map.values())
-
-        snapshot = {
-            "total_jobs_R": total_R,
-            "total_jobs_Q": total_Q,
-            "total_jobs_E": total_E,
-            "total_cpus_used": total_cpus,
-            "total_memory_used_gb": round(total_mem, 3),
-            "servers": [
-                {**s, "memory_used_gb": round(s["memory_used_gb"], 3)}
-                for s in server_map.values()
-            ],
-        }
-
-        # ── finish events (R→F transitions since last poll) ───────────────
-        events = []
-        for finished_job in self._job_db.get_finished():
-            fid = finished_job.get("JobID", "")
-            if not fid or fid in self._load_logger_finished_logged:
-                continue
-            # Only emit if job had at least one live (R/Q/E) period recorded
-            first_seen = finished_job.get("first_seen")
-            finished_at_str = finished_job.get("finished_at")
-            duration_s: Optional[float] = None
-            if first_seen and finished_at_str:
-                try:
-                    duration_s = (
-                        datetime.fromisoformat(finished_at_str)
-                        - datetime.fromisoformat(first_seen)
-                    ).total_seconds()
-                except Exception:
-                    pass
-
-            mem_raw_f = finished_job.get("Memory", "N/A")
-            mem_gb_f = self._parse_memory_gb(mem_raw_f)
-            cpus_raw_f = finished_job.get("CPUs", "N/A")
-            try:
-                cpus_f = int(cpus_raw_f) if cpus_raw_f not in (None, "N/A") else None
-            except (ValueError, TypeError):
-                cpus_f = None
-
-            events.append({
-                "type": "job_finished",
-                "job_id": fid,
-                "job_name": finished_job.get("Job_Name", "N/A"),
-                "owner": finished_job.get("Owner", "N/A"),
-                "server": finished_job.get("Server", "N/A"),
-                "cpus": cpus_f,
-                "memory_raw": mem_raw_f,
-                "memory_gb": round(mem_gb_f, 3) if mem_gb_f is not None else None,
-                "first_seen": first_seen,
-                "finished_at": finished_at_str,
-                "sim_duration_s": round(duration_s, 1) if duration_s is not None else None,
-            })
-            self._load_logger_finished_logged.add(fid)
-
-        return {
-            "timestamp": ts,
-            "snapshot": snapshot,
-            "jobs": job_records,
-            "events": events,
-        }
-
-    def _write_load_snapshot(self) -> None:
-        """Collect one snapshot and append it as a single line to today's NDJSON file.
-        If a secondary_dir is configured the same line is also appended there."""
-        try:
-            record = self._collect_load_snapshot()
-        except Exception as exc:
-            print(f"[load-logger] Failed to collect snapshot: {exc}")
-            return
-
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        filename = f"server_load_{date_str}.jsonl"
-        line = json.dumps(record, default=str) + "\n"
-
-        # Primary path
-        filepath = os.path.join(self._load_logger_dir, filename)
-        try:
-            os.makedirs(self._load_logger_dir, exist_ok=True)
-            with open(filepath, "a", encoding="utf-8") as fh:
-                fh.write(line)
-        except Exception as exc:
-            print(f"[load-logger] Failed to write snapshot to {filepath}: {exc}")
-            return
-
-        n_jobs = len(record["jobs"])
-        n_events = len(record["events"])
-        print(
-            f"[load-logger] Snapshot written → {filename} "
-            f"({n_jobs} jobs, {n_events} finish events)"
-        )
-
-        # Secondary (backup) path — failure here is non-fatal
-        if self._load_logger_secondary_dir:
-            sec_path = os.path.join(self._load_logger_secondary_dir, filename)
-            try:
-                os.makedirs(self._load_logger_secondary_dir, exist_ok=True)
-                with open(sec_path, "a", encoding="utf-8") as fh:
-                    fh.write(line)
-            except Exception as exc:
-                print(f"[load-logger] Failed to write secondary snapshot to {sec_path}: {exc}")
-
-    def _load_logger_loop(self) -> None:
-        """Daemon thread body: write a load snapshot every `_load_logger_interval` seconds."""
-        while True:
-            try:
-                self._write_load_snapshot()
-            except Exception as exc:
-                print(f"[load-logger] Unexpected error: {exc}")
-            time.sleep(self._load_logger_interval)
-
-    def _start_load_logger(self) -> None:
-        """Start the daemon thread that periodically logs server load snapshots."""
-        t = threading.Thread(
-            target=self._load_logger_loop,
-            name="load-logger",
-            daemon=True,
-        )
-        t.start()
-        print(
-            f"[load-logger] Started → {self._load_logger_dir} "
-            f"(every {self._load_logger_interval // 60} min)"
-        )
-
-    @staticmethod
-    def _html_esc(text: str) -> str:
-        """Minimal HTML escaping for safe insertion into table cells."""
-        if not text:
-            return ""
-        return (
-            str(text)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-        )
-
     def get_meta_status(self, job_id: str) -> dict:
         """Return current META status dict for the given job."""
-        db_entry = self._job_db.get(job_id)
-        meta_status = db_entry.get("meta_status", "idle") if db_entry else "idle"
-
-        # If DB says "ready", verify the metadb file actually exists on disk.
-        # It may have been deleted externally; if so, reset to idle.
-        if meta_status == "ready" and db_entry:
-            sim_dir = self.get_sim_dir(OrderedDict(db_entry.items()))
-            if not sim_dir or not os.path.isfile(os.path.join(sim_dir, "runtimePBSPro.metadb")):
-                self._job_db.set_meta_status(job_id, "idle")
-                meta_status = "idle"
-
-        with self._meta_lock:
+        if self.meta is None:
             return {
-                "configured": self._meta_exe is not None,
-                "meta_status": meta_status,
-                "meta_error": db_entry.get("meta_error") if db_entry else None,
-                "auto_watch": job_id in self._auto_watch,
-                "meta_generate_on_finish": db_entry.get("meta_generate_on_finish", False) if db_entry else False,
-                "batch_running": job_id in self._meta_batch_running,
+                "configured": False,
+                "meta_status": "idle",
+                "meta_error": None,
+                "auto_watch": False,
+                "meta_generate_on_finish": False,
+                "batch_running": False,
             }
+        return self.meta.get_status(job_id)
 
-    def _clear_meta_state(self, job_ids: List[str]) -> None:
-        """Remove in-memory META state for the given job IDs (call on delete)."""
-        with self._meta_lock:
-            for jid in job_ids:
-                self._auto_watch.discard(jid)
-                self._meta_batch_running.discard(jid)
-                self._meta_batch_start.pop(jid, None)
-                self._d3plot_counts.pop(jid, None)
-                self._d3plot_last_checked.pop(jid, None)
+    def clear_meta_state(self, job_ids: List[str]) -> None:
+        """Remove in-memory META state for the given job IDs (no-op if META disabled)."""
+        if self.meta is not None:
+            self.meta.clear_state(job_ids)
+
+    # ------------------------------------------------------------------
+    # Messag / log access
+    # ------------------------------------------------------------------
 
     def fetch_messag_content(
         self, job: OrderedDict, force_refresh: bool = False
@@ -1443,15 +614,6 @@ class JobMonitor:
         if not react_path:
             return None
 
-        # Derive server hostname from the original messag path for validation
-        messag_path = self.get_messag_path(job)
-        if not messag_path:
-            return None
-
-        linux_path = self._get_linux_messag_path(job)
-        if not linux_path:
-            return None
-
         cache_key = job.get("JobID", react_path)
         current_time = time.time()
 
@@ -1460,14 +622,6 @@ class JobMonitor:
                 cached_time = self._messag_cache_time.get(cache_key, 0)
                 if current_time - cached_time < self.cache_timeout:
                     return self._messag_cache[cache_key]
-
-        server_hostname, _ = self.windows_to_linux_path(messag_path)
-        if not server_hostname:
-            return None
-
-        server = self._get_server_by_hostname(server_hostname)
-        if not server:
-            return None
 
         if not os.path.exists(react_path):
             # messag_react not yet created — background copier hasn't run yet
@@ -1483,22 +637,8 @@ class JobMonitor:
             return content
 
         except Exception as e:
-            print(f"Error reading messag_react: {e}")
+            logger.warning("Error reading messag_react: %s", e)
             return None
-
-    def _get_linux_messag_path(self, job: OrderedDict) -> Optional[str]:
-        """Get Linux path to messag file"""
-        linux_path = job.get("Job_Path", "")
-        if not linux_path or linux_path == "N/A":
-            return None
-        return f"{linux_path}/Simulation/messag"
-
-    def _get_server_by_hostname(self, hostname: str) -> Optional[dict]:
-        """Get server config by hostname"""
-        for server in self.servers:
-            if server["hostname"] == hostname:
-                return server
-        return None
 
     def get_log_content(
         self, job: OrderedDict, max_lines: int = 100
@@ -1544,7 +684,7 @@ class JobMonitor:
                 return content, file_size
 
         except Exception as e:
-            print(f"Error reading messag_react log: {e}")
+            logger.warning("Error reading messag_react log: %s", e)
             return None, 0
 
     def clear_cache(self):
@@ -1559,6 +699,24 @@ class JobMonitor:
     def get_drive_mapping(self) -> dict:
         """Get drive to hostname mapping"""
         return self.drive_mapping.copy()
+
+    def _get_server_by_name(self, server_name: str) -> Optional[dict]:
+        """Get server config by display name."""
+        for server in self.servers:
+            if server["name"] == server_name:
+                return server
+        return None
+
+    def _get_server_by_hostname(self, hostname: str) -> Optional[dict]:
+        """Get server config by hostname"""
+        for server in self.servers:
+            if server["hostname"] == hostname:
+                return server
+        return None
+
+    # ------------------------------------------------------------------
+    # Job operations (kill / delete / submit)
+    # ------------------------------------------------------------------
 
     def kill_job(self, job: OrderedDict) -> Tuple[bool, str]:
         """
@@ -1576,13 +734,7 @@ class JobMonitor:
         if not job_id or not server_name:
             return False, "Invalid job data"
 
-        # Find the server config
-        server = None
-        for s in self.servers:
-            if s["name"] == server_name:
-                server = s
-                break
-
+        server = self._get_server_by_name(server_name)
         if not server:
             return False, f"Server {server_name} not found"
 
@@ -1617,16 +769,17 @@ class JobMonitor:
         job: OrderedDict,
         timeout: int = 120,
         poll_interval: float = 2.0,
-        progress_callback=None,
     ) -> Tuple[bool, str]:
         """
-        Wait for job to terminate by polling for job_log file (synchronous).
+        Wait for job to terminate by polling for job_log file.
+
+        Runs in a FastAPI threadpool worker, so blocking here does not stall
+        the event loop.
 
         Args:
             job: Job OrderedDict from fetch_jobs()
             timeout: Maximum time to wait in seconds (default 2 minutes)
             poll_interval: Time between checks in seconds
-            progress_callback: Optional callback(elapsed_seconds) for progress updates
 
         Returns:
             Tuple of (success, message)
@@ -1636,9 +789,6 @@ class JobMonitor:
 
         while True:
             elapsed = time.time() - start_time
-
-            if progress_callback:
-                progress_callback(elapsed)
 
             if self.is_job_terminated(job):
                 return True, f"Job {job_id} terminated ({int(elapsed)}s)"
@@ -1647,39 +797,6 @@ class JobMonitor:
                 return False, f"Timeout waiting for job {job_id} to terminate after {timeout}s"
 
             time.sleep(poll_interval)
-
-    async def async_wait_for_job_termination(
-        self,
-        job: OrderedDict,
-        timeout: int = 120,
-        poll_interval: float = 2.0,
-    ) -> Tuple[bool, str]:
-        """
-        Async version: wait for job termination without blocking the event loop.
-
-        Uses asyncio.sleep so FastAPI can serve other requests while polling.
-
-        Args:
-            job: Job OrderedDict from fetch_jobs()
-            timeout: Maximum time to wait in seconds (default 2 minutes)
-            poll_interval: Time between checks in seconds
-
-        Returns:
-            Tuple of (success, message)
-        """
-        job_id = job.get("JobID", "")
-        start_time = time.time()
-
-        while True:
-            elapsed = time.time() - start_time
-
-            if self.is_job_terminated(job):
-                return True, f"Job {job_id} terminated ({int(elapsed)}s)"
-
-            if elapsed >= timeout:
-                return False, f"Timeout waiting for job {job_id} to terminate after {timeout}s"
-
-            await asyncio.sleep(poll_interval)
 
     def delete_simulation_directory(self, job: OrderedDict) -> Tuple[bool, str]:
         """
@@ -1697,13 +814,7 @@ class JobMonitor:
         if not job_path or not server_name:
             return False, "Invalid job data"
 
-        # Find the server config
-        server = None
-        for s in self.servers:
-            if s["name"] == server_name:
-                server = s
-                break
-
+        server = self._get_server_by_name(server_name)
         if not server:
             return False, f"Server {server_name} not found"
 
@@ -1715,11 +826,9 @@ class JobMonitor:
             return False, f"Failed to connect to {server_name}"
 
         job_log_file = f"{job_path}/job_log"
-        del_command = f"rm {job_log_file}"
-        output = self.connect_and_execute(server, del_command)
+        self.connect_and_execute(server, f"rm {job_log_file}")
         job_err_file = f"{job_path}/job_error"
-        del_command = f"rm {job_err_file}"
-        output = self.connect_and_execute(server, del_command)
+        self.connect_and_execute(server, f"rm {job_err_file}")
 
         return True, f"Simulation directory and job log files deleted: {sim_path}"
 
@@ -1742,13 +851,7 @@ class JobMonitor:
         if not server_hostname or not linux_path:
             return False, "Could not convert path or determine server"
 
-        # Find server config by hostname
-        server = None
-        for s in self.servers:
-            if s["hostname"] == server_hostname:
-                server = s
-                break
-
+        server = self._get_server_by_hostname(server_hostname)
         if not server:
             return False, f"Server for {server_hostname} not found"
 
@@ -1757,11 +860,15 @@ class JobMonitor:
         output = self.connect_and_execute(server, command)
 
         if output is None:
-            return False, f"Failed to connect to server"
+            return False, "Failed to connect to server"
 
         if output.strip():
             return True, f"Job submitted: {output.strip()}"
         return True, "Job submitted successfully"
+
+    # ------------------------------------------------------------------
+    # Report generation
+    # ------------------------------------------------------------------
 
     def generate_report(self, windows_path: str) -> Tuple[bool, str]:
         """
@@ -1779,13 +886,7 @@ class JobMonitor:
         if not server_hostname or not linux_path:
             return False, "Could not convert path or determine server"
 
-        # Find server config by hostname
-        server = None
-        for s in self.servers:
-            if s["hostname"] == server_hostname:
-                server = s
-                break
-
+        server = self._get_server_by_hostname(server_hostname)
         if not server:
             return False, f"Server for {server_hostname} not found"
 
@@ -1826,16 +927,17 @@ class JobMonitor:
         windows_path: str,
         timeout: int = 240,
         poll_interval: float = 3.0,
-        progress_callback=None,
     ) -> Tuple[bool, str]:
         """
-        Wait for report generation to complete (synchronous).
+        Wait for report generation to complete.
+
+        Runs in a FastAPI threadpool worker, so blocking here does not stall
+        the event loop.
 
         Args:
             windows_path: Windows path to the job directory
             timeout: Maximum time to wait in seconds (default 4 minutes)
             poll_interval: Time between checks in seconds
-            progress_callback: Optional callback(elapsed_seconds) for progress updates
 
         Returns:
             Tuple of (success, message)
@@ -1844,9 +946,6 @@ class JobMonitor:
 
         while True:
             elapsed = time.time() - start_time
-
-            if progress_callback:
-                progress_callback(elapsed)
 
             if self.is_report_complete(windows_path):
                 return True, f"Report generation complete ({int(elapsed)}s)"
@@ -1855,38 +954,6 @@ class JobMonitor:
                 return False, f"Report generation timed out after {timeout}s"
 
             time.sleep(poll_interval)
-
-    async def async_wait_for_report_completion(
-        self,
-        windows_path: str,
-        timeout: int = 240,
-        poll_interval: float = 3.0,
-    ) -> Tuple[bool, str]:
-        """
-        Async version: wait for report completion without blocking the event loop.
-
-        Uses asyncio.sleep so FastAPI can serve other requests while polling.
-
-        Args:
-            windows_path: Windows path to the job directory
-            timeout: Maximum time to wait in seconds (default 4 minutes)
-            poll_interval: Time between checks in seconds
-
-        Returns:
-            Tuple of (success, message)
-        """
-        start_time = time.time()
-
-        while True:
-            elapsed = time.time() - start_time
-
-            if self.is_report_complete(windows_path):
-                return True, f"Report generation complete ({int(elapsed)}s)"
-
-            if elapsed >= timeout:
-                return False, f"Report generation timed out after {timeout}s"
-
-            await asyncio.sleep(poll_interval)
 
     def launch_report_viewer(self, windows_path: str) -> Tuple[bool, str]:
         """
@@ -1898,9 +965,6 @@ class JobMonitor:
         Returns:
             Tuple of (success, message)
         """
-        import subprocess
-        import platform
-
         # Define paths for the HTML viewer
         html_dir = os.path.join(windows_path, "Simulation", "_HTML")
         server_cmd_path = os.path.join(html_dir, "start_server.cmd")
@@ -1933,7 +997,7 @@ class JobMonitor:
                 return True, f"Report viewer launched from: {html_dir}"
 
             elif os.path.isfile(server_cmd_path):
-                return False, f"Only .cmd found but running on Linux. Please use start_server.sh"
+                return False, "Only .cmd found but running on Linux. Please use start_server.sh"
 
             else:
                 return False, f"No viewer script found in: {html_dir}"
@@ -1943,6 +1007,7 @@ class JobMonitor:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     monitor = JobMonitor()
     jobs = monitor.fetch_jobs()
 
