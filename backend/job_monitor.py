@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import platform
-import shutil
 import subprocess
 import threading
 import time
@@ -60,12 +59,10 @@ class JobMonitor:
         self.all_jobs: List[OrderedDict] = []
         self._messag_cache: Dict[str, str] = {}
         self._messag_cache_time: Dict[str, float] = {}
-        # Cache resolved messag source paths: Job_Path → windows messag path.
-        # Only positive hits are stored — None results are not cached so that
-        # jobs which start running after being queued pick up their path next
-        # cycle. Entries pointing into Simulation_Ret*/ are re-validated on
-        # read (see get_messag_path) so a new run's Simulation/ takes over.
-        self._messag_path_cache: Dict[str, str] = {}
+        # Rate-limiter for on-demand server-side messag copies, keyed by
+        # Job_Path / folder: avoids an SSH call per SSE tick when a job has
+        # no messag yet.
+        self._ensure_attempt_ts: Dict[str, float] = {}
 
         # Shared job list cache (serves all FastAPI clients)
         self._jobs_cache: List[OrderedDict] = []
@@ -290,23 +287,16 @@ class JobMonitor:
 
     def _do_final_messag_copy(self, job_dict: dict) -> None:
         """
-        Copy messag → messag_react one final time when a job is detected as finished.
-
-        Called the moment a previously-active job disappears from the live
-        server list, ensuring the last simulation output is captured before
-        the entry is archived in the database.
+        Copy messag → messag_react one final time when a job is detected as
+        finished. The copy runs server-side via SSH — the client never opens
+        the messag file (see the messag copier section below).
         """
         job_od = OrderedDict(job_dict.items())
-        src = self.get_messag_path(job_od)
-        dst = self.get_messag_react_path(job_od)
-        if src and dst:
-            try:
-                if os.path.isfile(src):
-                    shutil.copy2(src, dst)
-                    logger.info("Final messag copy done for job %s", job_dict.get("JobID"))
-            except Exception as exc:
-                logger.warning("Final messag copy failed for job %s: %s",
-                               job_dict.get("JobID"), exc)
+        server = self._get_server_by_name(job_od.get("Server", ""))
+        linux_sim_dir = self._linux_sim_dir(job_od)
+        if server and linux_sim_dir:
+            self._ssh_copy_messag(server, linux_sim_dir)
+            logger.info("Final messag copy requested for job %s", job_dict.get("JobID"))
 
     def _jobs_cache_fresh(self, ttl: int) -> bool:
         return bool(self._jobs_cache) and (time.time() - self._jobs_cache_time) < ttl
@@ -449,53 +439,6 @@ class JobMonitor:
             return None
         return self._resolve_sim_dir(windows_path)
 
-    def get_messag_path(self, job: OrderedDict) -> Optional[str]:
-        """
-        Get full path to the live messag file for a job.
-
-        Used internally by the background copier as the *source*.
-        Do NOT open this file directly for analysis — use get_messag_react_path()
-        instead so that Python never holds the LS-DYNA output file open.
-
-        Positive results are cached by Job_Path to avoid repeated network
-        filesystem stat/iterdir calls on mapped drives. A cached path inside a
-        Simulation_Ret*/ directory is re-validated: the moment a new run
-        creates a fresh Simulation/ in the same job directory the stale entry
-        is dropped, otherwise the copier would keep feeding the old run's
-        messag into the new run's messag_react.
-
-        Args:
-            job: Job OrderedDict from fetch_jobs()
-
-        Returns:
-            Windows path to messag file or None
-        """
-        job_path_key = job.get("Job_Path", "")
-        cached = self._messag_path_cache.get(job_path_key) if job_path_key else None
-        if cached:
-            sim_dir_name = os.path.basename(os.path.dirname(cached))
-            if sim_dir_name == "Simulation":
-                return cached
-            base_dir = os.path.dirname(os.path.dirname(cached))
-            if not os.path.exists(os.path.join(base_dir, "Simulation")):
-                return cached
-            # New Simulation/ appeared next to the cached Simulation_Ret*/ —
-            # invalidate and re-resolve below.
-            self._messag_path_cache.pop(job_path_key, None)
-            logger.info("messag path cache invalidated for %s (new Simulation/ found)",
-                        job_path_key)
-
-        windows_path = self.get_windows_path(job)
-        result = None
-        if windows_path:
-            sim_dir = self._resolve_sim_dir(windows_path)
-            if sim_dir:
-                result = os.path.join(sim_dir, "messag")
-
-        if result and job_path_key:
-            self._messag_path_cache[job_path_key] = result
-        return result
-
     def get_messag_react_path(self, job: OrderedDict) -> Optional[str]:
         """
         Get full path to the safe-to-read copy of the messag file.
@@ -515,34 +458,116 @@ class JobMonitor:
         return None
 
     # ------------------------------------------------------------------
-    # Background messag copier
+    # Background messag copier (server-side)
     # ------------------------------------------------------------------
+    #
+    # The Windows client must NEVER open the live LS-DYNA messag file —
+    # an open() over the SMB share can block the solver's I/O and has been
+    # observed to force restarts. All messag → messag_react copies therefore
+    # run ON the Linux server via SSH (cp on the local parallel filesystem,
+    # which LS-DYNA shares natively). `cp -p` preserves the source mtime so
+    # the mtime-keyed plot parse cache stays effective.
+
+    def _linux_sim_dir(self, job: OrderedDict) -> Optional[str]:
+        """
+        Linux path of the job's Simulation (or Simulation_Ret*) directory.
+        Resolution uses a directory listing on the mapped drive — no file
+        inside the directory is ever opened.
+        """
+        sim_dir_win = self.get_sim_dir(job)
+        job_path = job.get("Job_Path", "")
+        if not sim_dir_win or not job_path or job_path == "N/A":
+            return None
+        return f"{job_path}/{os.path.basename(sim_dir_win)}"
+
+    def _ssh_copy_messag(self, server: dict, linux_sim_dir: str) -> None:
+        """Run messag → messag_react copy on the server for one directory."""
+        cmd = (
+            f'if [ -f "{linux_sim_dir}/messag" ]; then '
+            f'cp -p "{linux_sim_dir}/messag" "{linux_sim_dir}/messag_react"; fi'
+        )
+        self.connect_and_execute(server, cmd)
+
+    def ensure_messag_react(self, job: OrderedDict,
+                            min_retry_interval: float = 30.0) -> Optional[str]:
+        """
+        Return the path to an existing messag_react, requesting a server-side
+        copy when it is missing (e.g. job finished while the backend was down).
+
+        Never opens the live messag file from the client. Attempts are
+        rate-limited per Job_Path so SSE polling cannot hammer SSH.
+        """
+        react_path = self.get_messag_react_path(job)
+        if not react_path:
+            return None
+        if os.path.isfile(react_path):
+            return react_path
+
+        key = job.get("Job_Path") or react_path
+        now = time.time()
+        if now - self._ensure_attempt_ts.get(key, 0) < min_retry_interval:
+            return None
+        self._ensure_attempt_ts[key] = now
+
+        server = self._get_server_by_name(job.get("Server", ""))
+        linux_sim_dir = self._linux_sim_dir(job)
+        if not server or not linux_sim_dir:
+            return None
+        self._ssh_copy_messag(server, linux_sim_dir)
+        return react_path if os.path.isfile(react_path) else None
+
+    def ensure_messag_react_in_folder(self, windows_folder: str) -> Optional[str]:
+        """
+        Folder-based variant for the interim-report endpoints: windows_folder
+        is the simulation directory itself (messag directly inside it).
+        Returns the messag_react path or None.
+        """
+        react_path = os.path.join(windows_folder, "messag_react")
+        if os.path.isfile(react_path):
+            return react_path
+
+        now = time.time()
+        if now - self._ensure_attempt_ts.get(windows_folder, 0) < 30.0:
+            return None
+        self._ensure_attempt_ts[windows_folder] = now
+
+        hostname, linux_folder = self.windows_to_linux_path(windows_folder)
+        if hostname and linux_folder:
+            server = self._get_server_by_hostname(hostname)
+            if server:
+                self._ssh_copy_messag(server, linux_folder)
+        return react_path if os.path.isfile(react_path) else None
 
     def _copy_all_messag_files(self) -> None:
         """
-        Copy messag → messag_react for every running job currently in the cache.
+        Request messag → messag_react copies for every running job, batched
+        into a single SSH command per server.
 
-        Q and E jobs are skipped: Q jobs have no messag file yet, and E jobs are
-        exiting (PBS will remove them shortly — no point copying at this stage).
-        Skipping them avoids O(N) network stat calls for large queues.
-
-        shutil.copy2 opens the source file only briefly (binary stream copy)
-        and closes it immediately, so the live LS-DYNA output file is locked
-        for the minimum possible time.
+        Q and E jobs are skipped: Q jobs have no messag file yet, and E jobs
+        are exiting (PBS will remove them shortly). Running jobs always write
+        into Simulation/, so no Simulation_Ret* resolution is needed here.
         """
         # Snapshot the list to avoid races with cache updates
         jobs = list(self._jobs_cache)
+        by_server: Dict[str, List[str]] = {}
         for job in jobs:
-            if job.get("Status") not in ("R",):
+            if job.get("Status") != "R":
                 continue
-            src = self.get_messag_path(job)
-            dst = self.get_messag_react_path(job)
-            if src and dst:
-                try:
-                    if os.path.isfile(src):
-                        shutil.copy2(src, dst)
-                except Exception as exc:
-                    logger.warning("Failed to copy for job %s: %s", job.get("JobID"), exc)
+            job_path = job.get("Job_Path", "")
+            if job_path and job_path != "N/A":
+                by_server.setdefault(job.get("Server", ""), []).append(job_path)
+
+        for server_name, paths in by_server.items():
+            server = self._get_server_by_name(server_name)
+            if not server:
+                continue
+            dir_list = " ".join(f'"{p}/Simulation"' for p in paths)
+            cmd = (
+                f"for d in {dir_list}; do "
+                'if [ -f "$d/messag" ]; then cp -p "$d/messag" "$d/messag_react"; fi; '
+                "done"
+            )
+            self.connect_and_execute(server, cmd)
 
     def _background_copy_loop(self) -> None:
         """Daemon thread body: copy messag files periodically."""
@@ -656,16 +681,12 @@ class JobMonitor:
         Returns:
             Tuple of (content, current_file_size)
         """
-        react_path = self.get_messag_react_path(job)
-        if react_path and os.path.exists(react_path):
-            read_path = react_path
-        else:
-            # Fall back to the live messag file — safe for finished jobs
-            # where messag_react was never created.
-            messag_path = self.get_messag_path(job)
-            if not messag_path or not os.path.exists(messag_path):
-                return None, 0
-            read_path = messag_path
+        # Never falls back to the live messag file: if messag_react is
+        # missing (e.g. job ran while the backend was down), request a
+        # server-side copy instead of opening messag from the client.
+        read_path = self.ensure_messag_react(job)
+        if not read_path:
+            return None, 0
 
         try:
             with open(read_path, "r", encoding="utf-8", errors="ignore") as f:

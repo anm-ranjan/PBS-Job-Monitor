@@ -143,51 +143,32 @@ def test_get_jobs_cached_ttl_and_force(monitor):
 
 
 # ---------------------------------------------------------------------------
-# messag path cache invalidation (Simulation vs Simulation_Ret*)
+# Simulation dir resolution (Simulation vs Simulation_Ret*)
 # ---------------------------------------------------------------------------
 
 
-def test_messag_path_cache_invalidated_when_new_simulation_appears(monitor, tmp_path):
-    """
-    Regression: the Job_Path-keyed cache kept pointing at Simulation_Ret*/messag
-    after a new run created a fresh Simulation/, so the copier fed the old
-    run's messag into the new run's messag_react.
-    """
+def test_sim_dir_simulation_preferred_over_ret(monitor, tmp_path):
+    """A new run's Simulation/ must win over a leftover Simulation_Ret*/."""
     job_dir = tmp_path / "jobA"
     ret_dir = job_dir / "Simulation_Ret1"
     ret_dir.mkdir(parents=True)
-    (ret_dir / "messag").write_text("old run")
 
     monitor.get_windows_path = lambda job: str(job_dir)
     job = OrderedDict(JobID="1.srvA", Job_Path="/mnt/fhgfs/u/jobA", Server="srvA")
 
-    # First resolution: only the Ret dir exists → cached
-    first = monitor.get_messag_path(job)
-    assert first == str(ret_dir / "messag")
-    assert monitor.get_messag_path(job) == first  # cache hit
+    # Only the Ret dir exists → resolves there
+    assert monitor.get_sim_dir(job) == str(ret_dir)
+    assert monitor.get_messag_react_path(job) == str(ret_dir / "messag_react")
 
-    # A new run creates a fresh Simulation/ — the stale entry must be dropped
+    # A new run creates a fresh Simulation/ — resolution must switch over
     sim_dir = job_dir / "Simulation"
     sim_dir.mkdir()
-    (sim_dir / "messag").write_text("new run")
-
-    assert monitor.get_messag_path(job) == str(sim_dir / "messag")
-    assert monitor.get_messag_react_path(job) == str(sim_dir / "messag_react")
     assert monitor.get_sim_dir(job) == str(sim_dir)
+    assert monitor.get_messag_react_path(job) == str(sim_dir / "messag_react")
+    assert monitor._linux_sim_dir(job) == "/mnt/fhgfs/u/jobA/Simulation"
 
 
-def test_messag_path_simulation_preferred_from_start(monitor, tmp_path):
-    job_dir = tmp_path / "jobB"
-    (job_dir / "Simulation").mkdir(parents=True)
-    (job_dir / "Simulation_Ret1").mkdir()
-
-    monitor.get_windows_path = lambda job: str(job_dir)
-    job = OrderedDict(JobID="2.srvA", Job_Path="/mnt/fhgfs/u/jobB", Server="srvA")
-
-    assert monitor.get_messag_path(job) == str(job_dir / "Simulation" / "messag")
-
-
-def test_messag_path_multiple_ret_dirs_unresolvable(monitor, tmp_path):
+def test_sim_dir_multiple_ret_dirs_unresolvable(monitor, tmp_path):
     job_dir = tmp_path / "jobC"
     (job_dir / "Simulation_Ret1").mkdir(parents=True)
     (job_dir / "Simulation_Ret2").mkdir()
@@ -195,5 +176,102 @@ def test_messag_path_multiple_ret_dirs_unresolvable(monitor, tmp_path):
     monitor.get_windows_path = lambda job: str(job_dir)
     job = OrderedDict(JobID="3.srvA", Job_Path="/mnt/fhgfs/u/jobC", Server="srvA")
 
-    assert monitor.get_messag_path(job) is None
     assert monitor.get_sim_dir(job) is None
+    assert monitor._linux_sim_dir(job) is None
+
+
+# ---------------------------------------------------------------------------
+# Server-side messag copying — the client must never open the live messag
+# ---------------------------------------------------------------------------
+
+
+def test_copier_runs_server_side_batched(monitor):
+    """
+    The periodic copier must issue one SSH cp command per server covering all
+    R jobs, and must not open any file on the client.
+    """
+    sent = []
+    monitor.connect_and_execute = lambda server, cmd: sent.append((server["name"], cmd)) or ""
+    monitor._jobs_cache = [
+        OrderedDict(Server="srvA", JobID="1.srvA", Status="R", Job_Path="/mnt/fhgfs/u/a"),
+        OrderedDict(Server="srvA", JobID="2.srvA", Status="R", Job_Path="/mnt/fhgfs/u/b"),
+        OrderedDict(Server="srvB", JobID="3.srvB", Status="Q", Job_Path="/mnt/fhgfs/u/c"),
+        OrderedDict(Server="srvB", JobID="4.srvB", Status="R", Job_Path="/mnt/fhgfs/u/d"),
+    ]
+
+    monitor._copy_all_messag_files()
+
+    assert sorted(name for name, _ in sent) == ["srvA", "srvB"]
+    cmd_a = next(cmd for name, cmd in sent if name == "srvA")
+    assert '"/mnt/fhgfs/u/a/Simulation"' in cmd_a
+    assert '"/mnt/fhgfs/u/b/Simulation"' in cmd_a
+    assert "cp -p" in cmd_a and "messag_react" in cmd_a
+    cmd_b = next(cmd for name, cmd in sent if name == "srvB")
+    assert '"/mnt/fhgfs/u/d/Simulation"' in cmd_b
+    assert "/mnt/fhgfs/u/c" not in cmd_b  # Q job skipped
+
+
+def test_ensure_messag_react_requests_server_copy(monitor, tmp_path):
+    job_dir = tmp_path / "jobX"
+    sim_dir = job_dir / "Simulation"
+    sim_dir.mkdir(parents=True)
+
+    monitor.get_windows_path = lambda job: str(job_dir)
+    calls = []
+
+    def fake_exec(server, cmd):
+        calls.append((server["name"], cmd))
+        # Simulate the server-side cp landing on the shared filesystem
+        (sim_dir / "messag_react").write_text("data")
+        return ""
+
+    monitor.connect_and_execute = fake_exec
+    job = OrderedDict(JobID="9.srvA", Server="srvA", Job_Path="/mnt/fhgfs/u/jobX")
+
+    path = monitor.ensure_messag_react(job)
+    assert path == str(sim_dir / "messag_react")
+    assert len(calls) == 1
+    assert calls[0][0] == "srvA"
+    assert 'cp -p "/mnt/fhgfs/u/jobX/Simulation/messag"' in calls[0][1]
+
+    # File now exists → no further SSH on subsequent calls
+    assert monitor.ensure_messag_react(job) == path
+    assert len(calls) == 1
+
+
+def test_ensure_messag_react_rate_limited(monitor, tmp_path):
+    """When the server has no messag either, retries are rate-limited."""
+    job_dir = tmp_path / "jobY"
+    (job_dir / "Simulation").mkdir(parents=True)
+
+    monitor.get_windows_path = lambda job: str(job_dir)
+    calls = []
+    monitor.connect_and_execute = lambda server, cmd: calls.append(cmd) or ""
+    job = OrderedDict(JobID="10.srvA", Server="srvA", Job_Path="/mnt/fhgfs/u/jobY")
+
+    assert monitor.ensure_messag_react(job) is None
+    assert monitor.ensure_messag_react(job) is None  # within retry interval
+    assert len(calls) == 1
+
+
+def test_get_log_content_never_opens_live_messag(monitor, tmp_path):
+    """With messag_react absent and the server copy failing, the log read
+    must return empty — it must not fall back to opening messag."""
+    job_dir = tmp_path / "jobZ"
+    sim_dir = job_dir / "Simulation"
+    sim_dir.mkdir(parents=True)
+    (sim_dir / "messag").write_text("live solver output — must not be read")
+
+    monitor.get_windows_path = lambda job: str(job_dir)
+    monitor.connect_and_execute = lambda server, cmd: ""  # copy "fails" silently
+    job = OrderedDict(JobID="11.srvA", Server="srvA", Job_Path="/mnt/fhgfs/u/jobZ")
+
+    content, size = monitor.get_log_content(job)
+    assert content is None
+    assert size == 0
+
+    # Once messag_react exists, the tail works again
+    (sim_dir / "messag_react").write_text("line1\nline2\n")
+    monitor._ensure_attempt_ts.clear()
+    content, size = monitor.get_log_content(job)
+    assert content == "line1\nline2\n"

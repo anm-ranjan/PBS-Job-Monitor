@@ -162,9 +162,11 @@ def _read_messag_content(monitor: JobMonitor, job: OrderedDict) -> Optional[str]
 
     1. fetch_messag_content()   — reads messag_react via TTL cache
     2. Direct messag_react read — bypasses cache (cold start or cache miss)
-    3. Live messag file         — safe for finished jobs; messag_react may
-                                  never have been created if the backend
-                                  was not running when the job ran.
+    3. ensure_messag_react()    — requests a server-side messag→messag_react
+                                  copy via SSH (job ran while the backend was
+                                  down). The live messag file is NEVER opened
+                                  from the client: an open() over the network
+                                  share can block LS-DYNA's I/O.
     """
     content = monitor.fetch_messag_content(job)
     if content is not None:
@@ -178,10 +180,10 @@ def _read_messag_content(monitor: JobMonitor, job: OrderedDict) -> Optional[str]
         except Exception:
             pass
 
-    messag_path = monitor.get_messag_path(job)
-    if messag_path and os.path.isfile(messag_path):
+    react_path = monitor.ensure_messag_react(job)
+    if react_path:
         try:
-            with open(messag_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(react_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
         except Exception:
             pass
@@ -370,18 +372,13 @@ def get_interim_plots(folder_path: str = Query(...)):
     The caller provides the Windows path to the simulation folder; 'messag' /
     'messag_react' is appended automatically.
 
-    Prefers messag_react (the background-maintained safe copy) to avoid
-    holding the live LS-DYNA output file open.  Falls back to messag for
-    finished simulations where messag_react has not been created yet.
+    Reads messag_react only. If it is missing, a server-side
+    messag → messag_react copy is requested via SSH — the live messag file
+    is never opened from the client (an open() over the network share can
+    block LS-DYNA's I/O).
     """
-    react_path = os.path.join(folder_path, "messag_react")
-    messag_path = os.path.join(folder_path, "messag")
-
-    if os.path.isfile(react_path):
-        read_path = react_path
-    elif os.path.isfile(messag_path):
-        read_path = messag_path
-    else:
+    read_path = get_monitor().ensure_messag_react_in_folder(folder_path)
+    if not read_path:
         raise HTTPException(
             status_code=404,
             detail=f"messag file not found in: {folder_path}"
@@ -398,18 +395,12 @@ def get_interim_optimal_timestep(folder_path: str = Query(...)):
     """
     Compute optimal DTMAX load-curve points from an arbitrary simulation folder.
 
-    Mirrors /api/report/interim-plots: tries messag_react first, falls back
-    to the live messag file so this works for any folder regardless of whether
-    the background copier has ever touched it.
+    Mirrors /api/report/interim-plots: reads messag_react only, requesting a
+    server-side copy when it is missing — the live messag file is never
+    opened from the client.
     """
-    react_path = os.path.join(folder_path, "messag_react")
-    messag_path = os.path.join(folder_path, "messag")
-
-    if os.path.isfile(react_path):
-        read_path = react_path
-    elif os.path.isfile(messag_path):
-        read_path = messag_path
-    else:
+    read_path = get_monitor().ensure_messag_react_in_folder(folder_path)
+    if not read_path:
         raise HTTPException(
             status_code=404,
             detail=f"messag file not found in: {folder_path}",

@@ -158,21 +158,15 @@ class StatusPageWriter:
             if status in ("R", "E", "F"):
                 job_od = OrderedDict(job.items())
                 content = None
-                react_path = monitor.get_messag_react_path(job_od)
-                if react_path and os.path.isfile(react_path):
+                # messag_react only — if missing, request a server-side copy.
+                # The live messag file is never opened from the client.
+                react_path = monitor.ensure_messag_react(job_od)
+                if react_path:
                     try:
                         with open(react_path, "r", encoding="utf-8", errors="ignore") as f:
                             content = f.read()
                     except Exception:
                         pass
-                if content is None:
-                    messag_path = monitor.get_messag_path(job_od)
-                    if messag_path and os.path.isfile(messag_path):
-                        try:
-                            with open(messag_path, "r", encoding="utf-8", errors="ignore") as f:
-                                content = f.read()
-                        except Exception:
-                            pass
 
                 if content:
                     try:
