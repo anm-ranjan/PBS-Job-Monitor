@@ -255,6 +255,7 @@ export default function ResultAnalyser({ job }) {
                 borderwidth: 1,
               },
               autosize: true,
+              uirevision: 'keep',
             }}
             config={{ displayModeBar: false, responsive: true }}
             style={{ width: '100%', height: '100%' }}

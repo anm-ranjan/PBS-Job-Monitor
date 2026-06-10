@@ -184,6 +184,7 @@ export default function OptimalTimestep({ job, folderPath }) {
     height: 380,
     margin: { l: 70, r: 40, t: 40, b: 60 },
     showlegend: false,
+    uirevision: 'keep',
   }
 
   const plotConfig = { displayModeBar: true, responsive: true }

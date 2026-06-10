@@ -56,6 +56,10 @@ function mergeLayout(fig, theme) {
       // Axis overrides: merge per-axis so log/title settings from backend are preserved
       xaxis: { ...fig.layout?.xaxis, ...base.xaxis },
       yaxis: { ...fig.layout?.yaxis, ...base.yaxis },
+      // Constant uirevision keeps user zoom/pan/legend state across re-renders
+      // (blink ticks, 20 s job refresh, 60 s data refetch). The Plot unmounts
+      // when another job is selected, so state never leaks between jobs.
+      uirevision: 'keep',
     },
   }
 }
