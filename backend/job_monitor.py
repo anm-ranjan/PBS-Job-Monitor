@@ -481,10 +481,18 @@ class JobMonitor:
         return f"{job_path}/{os.path.basename(sim_dir_win)}"
 
     def _ssh_copy_messag(self, server: dict, linux_sim_dir: str) -> None:
-        """Run messag → messag_react copy on the server for one directory."""
+        """
+        Run <source> → messag_react copy on the server for one directory.
+
+        The source is the LS-DYNA message file: 'messag' for SMP runs,
+        'mes0000' (master rank) for MPP runs. Prefer 'messag'; fall back to
+        'mes0000' when it is absent. The destination name is unchanged so all
+        downstream readers stay messag_react-only.
+        """
         cmd = (
-            f'if [ -f "{linux_sim_dir}/messag" ]; then '
-            f'cp -p "{linux_sim_dir}/messag" "{linux_sim_dir}/messag_react"; fi'
+            f'src="{linux_sim_dir}/messag"; '
+            f'[ -f "$src" ] || src="{linux_sim_dir}/mes0000"; '
+            f'[ -f "$src" ] && cp -p "$src" "{linux_sim_dir}/messag_react"'
         )
         self.connect_and_execute(server, cmd)
 
@@ -564,7 +572,8 @@ class JobMonitor:
             dir_list = " ".join(f'"{p}/Simulation"' for p in paths)
             cmd = (
                 f"for d in {dir_list}; do "
-                'if [ -f "$d/messag" ]; then cp -p "$d/messag" "$d/messag_react"; fi; '
+                'src="$d/messag"; [ -f "$src" ] || src="$d/mes0000"; '
+                '[ -f "$src" ] && cp -p "$src" "$d/messag_react"; '
                 "done"
             )
             self.connect_and_execute(server, cmd)

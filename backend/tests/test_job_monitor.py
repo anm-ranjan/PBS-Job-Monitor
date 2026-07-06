@@ -232,7 +232,12 @@ def test_ensure_messag_react_requests_server_copy(monitor, tmp_path):
     assert path == str(sim_dir / "messag_react")
     assert len(calls) == 1
     assert calls[0][0] == "srvA"
-    assert 'cp -p "/mnt/fhgfs/u/jobX/Simulation/messag"' in calls[0][1]
+    # Copy prefers 'messag' (SMP) and falls back to 'mes0000' (MPP master rank),
+    # writing the synthetic 'messag_react' snapshot in both cases.
+    cmd = calls[0][1]
+    assert 'src="/mnt/fhgfs/u/jobX/Simulation/messag"' in cmd
+    assert 'src="/mnt/fhgfs/u/jobX/Simulation/mes0000"' in cmd
+    assert 'cp -p "$src" "/mnt/fhgfs/u/jobX/Simulation/messag_react"' in cmd
 
     # File now exists → no further SSH on subsequent calls
     assert monitor.ensure_messag_react(job) == path
